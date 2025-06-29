@@ -106,8 +106,8 @@ def get_signals(data):
                 in_position = True
         elif in_position:
             # Check for exit conditions
-            if data['open'].iloc[i] >= entry_price * PERCENTAGE_PROFIT or data['open'].iloc[i] <= entry_price * PERCENTAGE_LOSS:
-                capital += units * data['open'].iloc[i]
+            if data['high'].iloc[i] >= entry_price * PERCENTAGE_PROFIT or data['high'].iloc[i] <= entry_price * PERCENTAGE_LOSS: # this needs to change to realtime price
+                capital += units * data['high'].iloc[i] # this as well
                 units = 0
 
                 signals[i] = -1
