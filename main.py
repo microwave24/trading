@@ -8,17 +8,20 @@ import pandas as pd
 import mplfinance as mpf
 import numpy as np
 
-API_KEY = "PKGJ4AHVH5N96O2V29QV"
-SECRET = "T8TcUvDr9CbO9y5g9i6ecPkgNxddR6fGf5gcLUQH"
+API_KEY = ""
+SECRET = ""
 
 TARGET_SYMBOL = "SOXL"
-SHORT_MA_PERIOD = 8
+SHORT_MA_PERIOD = 5
 LONG_MA_PERIOD = 30
-MIN_SHORT_DELTA = 0  # Minimum short delta to consider a buy signal
+MIN_SHORT_DELTA = -0.001  # Minimum short delta to consider a buy signal
 MAX_SHORT_DELTA = 10
-DELTA_DISTANCE = 8 # the number of bars we are looking back
+DELTA_DISTANCE = 1 # the number of bars we are looking back
 MAX_MA_DISTANCE = 0.05  # Maximum distance between short and long MA to consider a buy signal
 MINUTES = 10
+
+PERCENTAGE_PROFIT = 1.011  # profit threshold
+PERCENTAGE_LOSS = 0.95  # loss threshold
 
 # REAL TIME DATA 
 def start_quote_stream(api_key, secret_key, symbol):
@@ -67,12 +70,14 @@ def get_long_posiitions(data, longWindow=LONG_MA_PERIOD):
 
     return long_positions
 
+def derivative(current, previous, current_x, previous_x):
+    return (current - previous) / (current_x - previous_x)
+
 def get_short_deltas(data):
     # Calculate short deltas
-
     short_deltas = [0] * len(data)
     for i in range(SHORT_MA_PERIOD + DELTA_DISTANCE, len(data)):
-        short_deltas[i] = data['Short MA'].iloc[i - DELTA_DISTANCE] - data['Short MA'].iloc[i]
+        short_deltas[i] = derivative(data['Short MA'].iloc[i], data['Short MA'].iloc[i - DELTA_DISTANCE], i, i-DELTA_DISTANCE)
     return short_deltas
 
 def get_MA_distance(data):
@@ -86,17 +91,34 @@ def get_MA_distance(data):
 def get_buy_signal(data):
     # Check for buy signal
     buy = [0] * len(data)
+    sell = [0] * len(data)
     for i in range(LONG_MA_PERIOD - 1, len(data)):
         if data['Long Positions'].iloc[i] == 1 and data['Short Deltas'].iloc[i] > MIN_SHORT_DELTA and data['Short Deltas'].iloc[i] < MAX_SHORT_DELTA and data['MA Distance'].iloc[i] < MAX_MA_DISTANCE:
             buy[i] = 1
-    return buy
+            find_sell_positions(data, i, sell, PERCENTAGE_PROFIT, PERCENTAGE_LOSS)
+    return buy, sell
+
+def find_sell_positions(data, current_index, sell_positions, profit_threshold=1.015, loss_threshold=0.99):
+    # Find sell positions based on profit and loss thresholds
+    buy_price = data['open'].iloc[current_index]
+    for i in range(current_index, len(data)):
+        if data['Long Positions'].iloc[i] == 1:
+            current_price = data['open'].iloc[i]
+            if current_price >= buy_price * profit_threshold:
+                sell_positions[i] = 1  # Sell position due to profit
+                return True
+            elif current_price <= buy_price * loss_threshold:
+                sell_positions[i] = -1  # Sell position due to loss
+                return True
+              # Exit after finding the first sell position
+    return False  # No sell position found
 
 
 
 
 # MAIN EXECUTION
 def main():
-    historical_data = get_historical_data(API_KEY, SECRET, TARGET_SYMBOL, datetime.now() - timedelta(days=4), datetime.now() - timedelta(days=0.5))
+    historical_data = get_historical_data(API_KEY, SECRET, TARGET_SYMBOL, datetime.now() - timedelta(days=5), datetime.now() - timedelta(days=0.5))
 
     if historical_data is None:
         return
@@ -123,14 +145,14 @@ def main():
     historical_data['MA Distance'] = get_MA_distance(historical_data)
 
     # Highlight growing deltas WHEN short ma is above long ma
-    historical_data['Buy Signal'] = get_buy_signal(historical_data)
+    buy_signals, sell_signals = get_buy_signal(historical_data)
 
-    # Plot blue markers at buy signal points (at close price)
+    historical_data['Buy Signal'] = buy_signals
+    historical_data['Sell Signal'] = sell_signals
+
+    # Plot blue markers at buy signal points
     buy_signal_prices = pd.Series(np.nan, index=historical_data.index)
     buy_signal_prices[historical_data['Buy Signal'] == 1] = historical_data['open']
-
-    
-
     buy_markers = mpf.make_addplot(
         buy_signal_prices,
         type='scatter',
@@ -140,7 +162,17 @@ def main():
         panel=0
     )
 
-
+    # Plot red markers at sell signal points
+    sell_signal_prices = pd.Series(np.nan, index=historical_data.index)
+    sell_signal_prices[historical_data['Sell Signal'] != 0] = historical_data['open']
+    sell_markers = mpf.make_addplot(
+        sell_signal_prices,
+        type='scatter',
+        markersize=70,
+        marker='v',
+        color='red',
+        panel=0
+    )
 
     long_markers = mpf.make_addplot(
         long_entry_prices,
@@ -156,7 +188,7 @@ def main():
         addplots = [MAshort, MAlong, long_markers]
     else:
         print("At least one buy signal found.")
-        addplots = [MAshort, MAlong, long_markers, buy_markers]
+        addplots = [MAshort, MAlong, long_markers, buy_markers, sell_markers]
     # Export historical data to CSV
     historical_data.to_csv(f"{TARGET_SYMBOL}_historical_data.csv")
 
