@@ -20,8 +20,8 @@ DELTA_DISTANCE = 1 # the number of bars we are looking back
 MAX_MA_DISTANCE = 0.05  # Maximum distance between short and long MA to consider a buy signal
 MINUTES = 20
 
-PERCENTAGE_PROFIT = 1.015  # profit threshold
-PERCENTAGE_LOSS = 0.99  # loss threshold
+PERCENTAGE_PROFIT = 1.02  # profit threshold
+PERCENTAGE_LOSS = 0.5  # loss threshold
 
 # REAL TIME DATA 
 def start_quote_stream(api_key, secret_key, symbol):
@@ -89,6 +89,8 @@ def get_MA_distance(data):
     
     
 def get_signals(data):
+    capital = 10000  # Starting capital for the strategy
+    units = 0
     in_position = False
     entry_price = 0
     signals = [0] * len(data)
@@ -96,19 +98,31 @@ def get_signals(data):
         if data['Long Positions'].iloc[i] == 1 and data['Short Deltas'].iloc[i] > MIN_SHORT_DELTA and data['Short Deltas'].iloc[i] < MAX_SHORT_DELTA and data['MA Distance'].iloc[i] < MAX_MA_DISTANCE:
             if not in_position:
                 signals[i] = 1  # Buy signal
+
+                units = capital // data['open'].iloc[i]
+                capital -= units * data['open'].iloc[i]
+
                 entry_price = data['open'].iloc[i]
                 in_position = True
         elif in_position:
             # Check for exit conditions
             if data['open'].iloc[i] >= entry_price * PERCENTAGE_PROFIT or data['open'].iloc[i] <= entry_price * PERCENTAGE_LOSS:
+                capital += units * data['open'].iloc[i]
+                units = 0
+
                 signals[i] = -1
                 in_position = False
+
+        if i == len(data) - 1 and in_position:
+            capital = units * entry_price
+
+    print(f"Final capital: {capital}")
     return signals
 
 
 # MAIN EXECUTION
 def main():
-    historical_data = get_historical_data(API_KEY, SECRET, TARGET_SYMBOL, datetime.now() - timedelta(days=30), datetime.now() - timedelta(days=0.5))
+    historical_data = get_historical_data(API_KEY, SECRET, TARGET_SYMBOL, datetime.now() - timedelta(days=80), datetime.now() - timedelta(days=0.5))
 
     if historical_data is None:
         return
@@ -186,15 +200,19 @@ def main():
 
     addplots = [MAshort, MAlong, long_markers, buy_marker, sell_marker]
 
-    # Plot with mplfinance (no volume)
-    mpf.plot(
-        historical_data,
-        type='candle',
-        style='charles',
-        title=f"{TARGET_SYMBOL} Candlestick Chart",
-        addplot=addplots,
-        volume=False
-    )
+    import warnings
+    # Suppress warnings from mplfinance
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        # Plot with mplfinance (no volume)
+        mpf.plot(
+            historical_data,
+            type='candle',
+            style='charles',
+            title=f"{TARGET_SYMBOL} Candlestick Chart",
+            addplot=addplots,
+            volume=False
+        )
 
 if __name__ == "__main__":
     main()
