@@ -14,14 +14,17 @@ SECRET = ""
 TARGET_SYMBOL = "SOXL"
 SHORT_MA_PERIOD = 8
 LONG_MA_PERIOD = 20
-MIN_SHORT_DELTA = -0.001  # Minimum short delta to consider a buy signal
-MAX_SHORT_DELTA = 10
+MIN_SHORT_DELTA = -0.005  # Minimum short delta to consider a buy signal
+MAX_SHORT_DELTA = 1
 DELTA_DISTANCE = 1 # the number of bars we are looking back
-MAX_MA_DISTANCE = 0.05  # Maximum distance between short and long MA to consider a buy signal
-MINUTES = 20
+MAX_MA_DISTANCE = 0.2  # Maximum distance between short and long MA to consider a buy signal
+MINUTES = 2
 
-PERCENTAGE_PROFIT = 1.02  # profit threshold
-PERCENTAGE_LOSS = 0.5  # loss threshold
+PERCENTAGE_PROFIT = 1.005  # profit threshold
+PERCENTAGE_LOSS = 0.95  # loss threshold
+
+START_DAY_AGO = 40
+END_DAY_AGO = 0.5  # 0.5 days ago, so we get the (almost) latest data
 
 # REAL TIME DATA 
 def start_quote_stream(api_key, secret_key, symbol):
@@ -41,17 +44,27 @@ def start_quote_stream(api_key, secret_key, symbol):
 
 # HISTORICAL DATA
 
-def get_historical_data(api_key, secret_key, symbol, startdate=None, endDate=None):
+def get_historical_data(api_key, secret_key, symbol, startdate=None, endDate=None, daily=False):
     # Create the client
     client = StockHistoricalDataClient(api_key, secret_key)
+    request_params = None
 
     # Create the request
-    request_params = StockBarsRequest(
+    if daily: # If daily data is requested, we get daily bars
+        request_params = StockBarsRequest(
+            symbol_or_symbols=[symbol],
+            timeframe=TimeFrame.Day,  # Daily bars
+            start=startdate,
+            end=endDate
+        )
+    else:
+        request_params = StockBarsRequest(
         symbol_or_symbols=[symbol],
-        timeframe=TimeFrame(MINUTES, TimeFrameUnit.Minute),  # 10m bars
+        timeframe=TimeFrame(MINUTES, TimeFrameUnit.Minute),  # variable minute bars
         start=startdate,
         end= endDate 
     )
+    
 
     # Fetch bars
     bars = client.get_stock_bars(request_params)
@@ -90,6 +103,8 @@ def get_MA_distance(data):
     
 def get_signals(data):
     capital = 10000  # Starting capital for the strategy
+    wins = 0
+    total_trades = 0
     units = 0
     in_position = False
     entry_price = 0
@@ -104,9 +119,12 @@ def get_signals(data):
 
                 entry_price = data['open'].iloc[i]
                 in_position = True
+                total_trades += 1
         elif in_position:
             # Check for exit conditions
             if data['high'].iloc[i] >= entry_price * PERCENTAGE_PROFIT or data['high'].iloc[i] <= entry_price * PERCENTAGE_LOSS: # this needs to change to realtime price
+                if data['high'].iloc[i] >= entry_price * PERCENTAGE_PROFIT:
+                    wins += 1
                 capital += units * data['high'].iloc[i] # this as well
                 units = 0
 
@@ -116,13 +134,14 @@ def get_signals(data):
         if i == len(data) - 1 and in_position:
             capital = units * entry_price
 
-    print(f"Final capital: {capital}")
+    print(f"Final capital: {capital}, winrate: {wins / total_trades if total_trades > 0 else 0:.2f}, total trades: {total_trades}, daily trades: {(total_trades / START_DAY_AGO):.2f}")
     return signals
 
 
 # MAIN EXECUTION
 def main():
-    historical_data = get_historical_data(API_KEY, SECRET, TARGET_SYMBOL, datetime.now() - timedelta(days=80), datetime.now() - timedelta(days=0.5))
+    historical_data = get_historical_data(API_KEY, SECRET, TARGET_SYMBOL, datetime.now() - timedelta(days=START_DAY_AGO), datetime.now() - timedelta(days=END_DAY_AGO))
+    #daily_data = get_historical_data(API_KEY, SECRET, TARGET_SYMBOL, datetime.now() - timedelta(days=START_DAY_AGO), datetime.now() - timedelta(days=0.5), daily=True)
 
     if historical_data is None:
         return
@@ -130,6 +149,11 @@ def main():
     # Ensure datetime index
     historical_data['timestamp'] = pd.to_datetime(historical_data['timestamp'])
     historical_data.set_index('timestamp', inplace=True)
+
+    #daily_data['timestamp'] = pd.to_datetime(daily_data['timestamp'])
+    #daily_data.set_index('timestamp', inplace=True)
+    # Export daily data to CSV
+    #daily_data.to_csv(f"{TARGET_SYMBOL}_daily_data.csv")
 
     historical_data['Short MA'] = historical_data['close'].rolling(window=SHORT_MA_PERIOD).mean().fillna(np.nan)
     historical_data['Long MA']  = historical_data['close'].rolling(window=LONG_MA_PERIOD).mean().fillna(np.nan)
