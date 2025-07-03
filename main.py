@@ -8,8 +8,8 @@ import pandas as pd
 import mplfinance as mpf
 import numpy as np
 
-API_KEY = ""
-SECRET = ""
+API_KEY = "PKAXTN4AN4K04RUYOH45"
+SECRET = "vyFgaaKkid9sjZpyqcPafiUeQ5Fqkvgzp7KZga7a"
 
 TARGET_SYMBOL = "SOXL"
 SHORT_MA_PERIOD = 5
