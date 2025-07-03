@@ -12,18 +12,18 @@ API_KEY = ""
 SECRET = ""
 
 TARGET_SYMBOL = "SOXL"
-SHORT_MA_PERIOD = 8
+SHORT_MA_PERIOD = 5
 LONG_MA_PERIOD = 20
-MIN_SHORT_DELTA = -0.005  # Minimum short delta to consider a buy signal
-MAX_SHORT_DELTA = 1
+MIN_SHORT_DELTA = -0.1  # Minimum short delta to consider a buy signal
+MAX_SHORT_DELTA = 0.1
 DELTA_DISTANCE = 1 # the number of bars we are looking back
-MAX_MA_DISTANCE = 0.2  # Maximum distance between short and long MA to consider a buy signal
-MINUTES = 2
+MAX_MA_DISTANCE = 0.1  # Maximum distance between short and long MA to consider a buy signal
+MINUTES = 59
 
-PERCENTAGE_PROFIT = 1.005  # profit threshold
+PERCENTAGE_PROFIT = 1.05  # profit threshold
 PERCENTAGE_LOSS = 0.95  # loss threshold
 
-START_DAY_AGO = 40
+START_DAY_AGO = 220
 END_DAY_AGO = 0.5  # 0.5 days ago, so we get the (almost) latest data
 
 # REAL TIME DATA 
@@ -110,32 +110,38 @@ def get_signals(data):
     entry_price = 0
     signals = [0] * len(data)
     for i in range(LONG_MA_PERIOD, len(data)):
-        if data['Long Positions'].iloc[i] == 1 and data['Short Deltas'].iloc[i] > MIN_SHORT_DELTA and data['Short Deltas'].iloc[i] < MAX_SHORT_DELTA and data['MA Distance'].iloc[i] < MAX_MA_DISTANCE:
+        if data['Long Positions'].iloc[i - 1] == 1 and data['Short Deltas'].iloc[i - 1] > MIN_SHORT_DELTA and data['Short Deltas'].iloc[i - 1] < MAX_SHORT_DELTA and data['MA Distance'].iloc[i - 1] < MAX_MA_DISTANCE:
             if not in_position:
                 signals[i] = 1  # Buy signal
-
-                units = capital // data['open'].iloc[i]
+                capital-=1 # small fee for buying
+                units = capital // data['open'].iloc[i] # this needs to change to realtime price
                 capital -= units * data['open'].iloc[i]
+                
 
                 entry_price = data['open'].iloc[i]
                 in_position = True
                 total_trades += 1
         elif in_position:
             # Check for exit conditions
-            if data['high'].iloc[i] >= entry_price * PERCENTAGE_PROFIT or data['high'].iloc[i] <= entry_price * PERCENTAGE_LOSS: # this needs to change to realtime price
+            if data['high'].iloc[i] >= entry_price * PERCENTAGE_PROFIT or data['open'].iloc[i] <= entry_price * PERCENTAGE_LOSS: # this needs to change to realtime price
+                #print(f"Trade closed at {data['open'].iloc[i]} with entry price {entry_price}")
                 if data['high'].iloc[i] >= entry_price * PERCENTAGE_PROFIT:
+                    capital += units * entry_price * 1.005 # this as well
                     wins += 1
-                capital += units * data['high'].iloc[i] # this as well
+                else:
+                    capital += units * data['open'].iloc[i]
+                capital-= 1 # small fee for selling
+                
                 units = 0
 
                 signals[i] = -1
                 in_position = False
-
         if i == len(data) - 1 and in_position:
             capital = units * entry_price
 
     print(f"Final capital: {capital}, winrate: {wins / total_trades if total_trades > 0 else 0:.2f}, total trades: {total_trades}, daily trades: {(total_trades / START_DAY_AGO):.2f}")
     return signals
+
 
 
 # MAIN EXECUTION
@@ -176,11 +182,11 @@ def main():
 
     # Create green arrows for buy signals (Signals == 1)
     buy_arrows = pd.Series(np.nan, index=historical_data.index)
-    buy_arrows[historical_data['Signals'] == 1] = historical_data['low'] - (historical_data['high'] - historical_data['low']) * 0.1
+    buy_arrows[historical_data['Signals'] == 1] = historical_data['open']
 
     # Create red arrows for sell signals (Signals == -1)
     sell_arrows = pd.Series(np.nan, index=historical_data.index)
-    sell_arrows[historical_data['Signals'] == -1] = historical_data['high'] + (historical_data['high'] - historical_data['low']) * 0.1
+    sell_arrows[historical_data['Signals'] == -1] = historical_data['open']
 
     buy_marker = mpf.make_addplot(
         buy_arrows,
