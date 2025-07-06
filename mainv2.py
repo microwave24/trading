@@ -55,6 +55,8 @@ def MACD(data, short_window=SHORT_MA_PERIOD, long_window=LONG_MA_PERIOD):
     data['MACD'] = data['Short_MA'] - data['Long_MA']
     data['Signal_Line'] = data['MACD'].ewm(span=9, adjust=False).mean()
 
+    data['MACD_Histogram'] = data['MACD'] - data['Signal_Line']
+
     return data
 
 
@@ -88,30 +90,36 @@ def get_historical_data(api_key, secret_key, symbol, startdate=None, endDate=Non
     print("Historical data retrieved")
     return data
 
-def get_MACD_clusters(data):
+def get_clusters(data, column='MACD', max_clusters=2):
     """
-    Identify MACD clusters based on the MACD histogram.
-    This function will return a list of arrays where each array contains the indices of the MACD histogram values that are part of a cluster.
+    Identify clusters of non-zero values in the specified column.
+    Returns a list of arrays, each containing (index, value) tuples that belong to a cluster.
     """
     clusters = []
     in_cluster = False
     current_cluster = []
 
-    for i in range(len(data['MACD']) - 1, -1, -1):
-        if len(clusters) >= 2:
-           break
+    for i in range(len(data[column]) - 1, -1, -1):
+        if len(clusters) >= max_clusters:
+            break
 
-        if data['MACD'].iloc[i] != 0:
+        value = data[column].iloc[i]
+        if value != 0:
             if not in_cluster:
                 in_cluster = True
-                current_cluster = [(data.index[i], data['MACD'].iloc[i])]
+                current_cluster = [(data.index[i], value)]
             else:
-                current_cluster.append((data.index[i], data['MACD'].iloc[i]))
+                current_cluster.append((data.index[i], value))
         else:
             if in_cluster:
                 clusters.append(current_cluster)
                 in_cluster = False
                 current_cluster = []
+
+    # In case the loop ends while still in a cluster
+    if in_cluster:
+        clusters.append(current_cluster)
+
     return clusters
     
 
@@ -128,67 +136,25 @@ def backtest(data):
     5. Return a summary of the performance metrics.
     """
     in_position = False
-    
+
+    macd_df = data[['MACD_Histogram']].copy()
+    macd_df['bearish_h'] = data['MACD_Histogram'].apply(lambda x: x if x < 0 else 0)
+    macd_df['bullish_h'] = data['MACD_Histogram'].apply(lambda x: x if x > 0 else 0)
+     
     for i in range(bollinger_window + 1, len(data)):
-        
-        window = data.iloc[i - bollinger_window:i].copy()
-        prev_close = window['close'].iloc[-2]
+
+        prev_close = data['close'].iloc[i-1]
         current_open = data['open'].iloc[i]
 
-        window_MACD = MACD(window, SHORT_MA_PERIOD, LONG_MA_PERIOD)
-        window_bollinger = bollinger_bands(window, bollinger_window, bollinger_std_dev)
-
-        # Copy window_MACD and replace any negative values with 0
-        # Keep only the index (timestamp) and MACD column
-        bullish_MACD = window_MACD[['MACD']].copy()
-        bullish_MACD[bullish_MACD['MACD'] < 0] = 0
-
-        bearish_MACD = window_MACD[['MACD']].copy()
-        bearish_MACD[bearish_MACD['MACD'] > 0] = 0
-        
-        bullish_MACD_clusters = get_MACD_clusters(bullish_MACD)
-        bearish_MACD_clusters = get_MACD_clusters(bearish_MACD)
 
         #first requirement: outside the Bollinger Bands
-        if (prev_close < window_bollinger['Lower_Band'].iloc[-1]): # bullish signal
-            #second requirement: MACD divergence
-            #if bearish_MACD['MACD'].iloc[-1] < bearish_MACD['MACD'].iloc[-2]: # the current MACD cluster has not formed a peak peak
-                #continue
-            
-            cluster_lows = [min(cluster, key=lambda x: x[1])[1] for cluster in bearish_MACD_clusters]
+        if (prev_close < data['Lower_Band'].iloc[i] or 1==1): # bullish signal
+            clusters = get_clusters(macd_df[:i], column='bullish_h', max_clusters=2)
+            print(clusters)
+        break
+        #elif (prev_close > data['Upper_Band'].iloc[i]): # bearish signal
+            #print(f'{data.index[i]} bearish')
 
-            
-            MACD_Direction = (cluster_lows[0] - cluster_lows[1])**MACD_SENSITIVITY #[0] is the most recent cluster, [1] is the previous cluster
-            period = bearish_MACD_clusters[1][-1][0] # period between the two clusters
-
-            print(f'{period} bullish')
-            
-            price_difference = data.loc[data.index[i - 1], 'low'] - data.loc[period, 'low']
-
-
-            if MACD_Direction > MACD_UNCERTAINTY_THRESHOLD and price_difference < PRICE_UNCERTAINTY_THRESHOLD: #MACD is increasing and price is moving down:
-                in_position = True
-        elif (prev_close > window_bollinger['Upper_Band'].iloc[-1]): # bearish signal
-
-            #if bullish_MACD['MACD'].iloc[-1] > bullish_MACD['MACD'].iloc[-2]: # the current MACD cluster might of formed a peak
-                #continue
-
-            cluster_highs = [max(cluster, key=lambda x: x[1])[1] for cluster in bullish_MACD_clusters]
-
-            MACD_Direction = (cluster_highs[0] - cluster_highs[1])**MACD_SENSITIVITY #[0] is the most recent cluster, [1] is the previous cluster
-            period = bullish_MACD_clusters[1][-1][0]# period between the two clusters
-            print(f'{period} bearish')
-
-            price_difference = data.loc[data.index[i - 1], 'high'] - data.loc[period, 'high']
-
-            if MACD_Direction < -MACD_UNCERTAINTY_THRESHOLD and price_difference > PRICE_UNCERTAINTY_THRESHOLD: #MACD is decreasing and price is moving up:
-                in_position = True
-        
-        if in_position:
-            # Check if the price has reached the profit threshold
-            if (current_open >= prev_close * PERCENTAGE_PROFIT or current_open > window_bollinger['Upper_Band'].iloc[-2]):
-                print(f"Profit taken at {current_open} on {data.index[i]}")
-                in_position = False
 
 
 
