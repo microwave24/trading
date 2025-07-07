@@ -21,17 +21,20 @@ bollinger_window = 200  # Bollinger Bands window size
 bollinger_std_dev = 2  # Standard deviation for Bollinger Bands
 
 MACD_UNCERTAINTY_THRESHOLD = 0.0  # percentage threshold for uncertainty in MACD crossovers
-MACD_SENSITIVITY = 1.0  # percentage threshold for sensitivity in MACD crossovers
 PRICE_UNCERTAINTY_THRESHOLD = 0.0  # percentage threshold for uncertainty in price movements
+
+MACD_SENSITIVITY = 1.0  # percentage threshold for sensitivity in MACD crossovers
+PRICE_SENSITIVITY = 1.0  # percentage threshold for sensitivity in price movements
 
 MINUTES = 1
 HOURS = 1
 
-PERCENTAGE_PROFIT = 1.07  # profit threshold
+PERCENTAGE_PROFIT = 1.1  # profit threshold
+PERCENTAGE_LOSS = 0.95  # loss threshold
 
 
-START_DAY_AGO = 4
-END_DAY_AGO = 2  # 0.5 days ago, so we get the (almost) latest data
+START_DAY_AGO = 30
+END_DAY_AGO = 3  # 0.5 days ago, so we get the (almost) latest data
 
 def bollinger_bands(data, window=bollinger_window, std_dev=bollinger_std_dev):
     """
@@ -67,26 +70,32 @@ def get_historical_data(api_key, secret_key, symbol, startdate=None, endDate=Non
     request_params = None
 
     # Create the request
-    if Hourly: # If daily data is requested, we get daily bars
+    if Hourly:  # If hourly data is requested
         request_params = StockBarsRequest(
             symbol_or_symbols=[symbol],
-            timeframe=TimeFrame(HOURS, TimeFrameUnit.Hour),  # Daily bars
+            timeframe=TimeFrame(HOURS, TimeFrameUnit.Hour),
             start=startdate,
             end=endDate
         )
     else:
         request_params = StockBarsRequest(
-        symbol_or_symbols=[symbol],
-        timeframe=TimeFrame(MINUTES, TimeFrameUnit.Minute),  # variable minute bars
-        start=startdate,
-        end= endDate 
-    )
-    
+            symbol_or_symbols=[symbol],
+            timeframe=TimeFrame(MINUTES, TimeFrameUnit.Minute),
+            start=startdate,
+            end=endDate
+        )
 
     # Fetch bars
     bars = client.get_stock_bars(request_params)
+
     # Convert the list of bars to a DataFrame
     data = pd.DataFrame([bar.__dict__ for bar in bars[symbol]])
+
+    # Convert 'timestamp' to UTC-4
+    if 'timestamp' in data.columns:
+        data['timestamp'] = pd.to_datetime(data['timestamp'], utc=True)
+        data['timestamp'] = data['timestamp'].dt.tz_convert('Etc/GMT+4')  # UTC-4
+
     print("Historical data retrieved")
     return data
 
@@ -136,43 +145,107 @@ def backtest(data):
     5. Return a summary of the performance metrics.
     """
     in_position = False
+    starting_capital = 10000  # Starting capital for the strategy
+    entry_price = 0
+    units = 0
 
     macd_df = data[['MACD_Histogram']].copy()
     macd_df['bearish_h'] = data['MACD_Histogram'].apply(lambda x: x if x < 0 else 0)
     macd_df['bullish_h'] = data['MACD_Histogram'].apply(lambda x: x if x > 0 else 0)
-     
+
+    signals = [0] * len(data)
+    
+    
     for i in range(bollinger_window + 1, len(data)):
+        # Skip if timestamp is not between 8:30 am and 3:30 pm
+        current_time = data.index[i].time()
+        if not (current_time >= datetime.strptime("08:30", "%H:%M").time() and current_time <= datetime.strptime("15:30", "%H:%M").time()):
+            continue
 
         prev_close = data['close'].iloc[i-1]
         current_open = data['open'].iloc[i]
 
+        if current_open > entry_price * PERCENTAGE_PROFIT and in_position:
+            starting_capital += units * entry_price * PERCENTAGE_PROFIT  # Sell all units at current price
+            units = 0 
+                    
+            signals[i] = -1
+            in_position = False
+
+        if current_open < entry_price * PERCENTAGE_LOSS and in_position:
+            starting_capital += units * entry_price * PERCENTAGE_LOSS
+            units = 0
+
+            signals[i] = -1
+            in_position = False
+
+
 
         #first requirement: outside the Bollinger Bands
-        if (prev_close < data['Lower_Band'].iloc[i] or 1==1): # bullish signal
+        if (prev_close < data['Lower_Band'].iloc[i] and in_position == False): # bullish signal
+            clusters = get_clusters(macd_df[:i], column='bearish_h', max_clusters=2)
+            cluster0 = clusters[0] if len(clusters) > 0 else [0]
+            cluster1 = clusters[1] if len(clusters) > 1 else [0]
+
+            #print(f'cluster0: {cluster0}, cluster1: {cluster1}')
+            cluster0_min = min([x[1] for x in cluster0]) 
+            cluster1_min = min([x[1] for x in cluster1])
+
+            # Extract timestamps of the minimum values in cluster0 and cluster1
+            cluster0_min_idx = cluster0[[x[1] for x in cluster0].index(cluster0_min)][0]
+            cluster1_min_idx = cluster1[[x[1] for x in cluster1].index(cluster1_min)][0]
+            time_diff_minutes = int(abs((cluster0_min_idx - cluster1_min_idx).total_seconds() / 60.0))
+
+            period = time_diff_minutes
+
+            MACD_divergence_direction = (cluster0_min - cluster1_min)**MACD_SENSITIVITY
+            Price_directrion = (data['Signal_Line'].iloc[i] - data['Signal_Line'].iloc[i-period])**PRICE_SENSITIVITY
+
+            if(MACD_divergence_direction > 0 and Price_directrion < 0):
+                units = starting_capital // current_open  # Calculate how many units we can buy
+                starting_capital -= units * current_open
+                entry_price = current_open
+
+                signals[i] = 1  # Buy signal
+                in_position = True
+                
+        elif (prev_close > data['Upper_Band'].iloc[i]): # bearish signal
             clusters = get_clusters(macd_df[:i], column='bullish_h', max_clusters=2)
-            print(clusters)
-        break
-        #elif (prev_close > data['Upper_Band'].iloc[i]): # bearish signal
-            #print(f'{data.index[i]} bearish')
+            cluster0 = clusters[0] if len(clusters) > 0 else [0]
+            cluster1 = clusters[1] if len(clusters) > 1 else [0]
 
+            cluster0_min = max([x[1] for x in cluster0]) 
+            cluster1_min = max([x[1] for x in cluster1])
 
+            # Extract timestamps of the minimum values in cluster0 and cluster1
+            cluster0_min_idx = cluster0[[x[1] for x in cluster0].index(cluster0_min)][0]
+            cluster1_min_idx = cluster1[[x[1] for x in cluster1].index(cluster1_min)][0]
+            time_diff_minutes = int(abs((cluster0_min_idx - cluster1_min_idx).total_seconds() / 60.0))
 
+            period = time_diff_minutes
 
+            MACD_divergence_direction = (cluster0_min - cluster1_min)**MACD_SENSITIVITY
+            Price_directrion = (data['Signal_Line'].iloc[i] - data['Signal_Line'].iloc[i-period])**PRICE_SENSITIVITY
 
+            if(MACD_divergence_direction < 0 and Price_directrion > 0):
+                if in_position:
+                    starting_capital += units * current_open  # Sell all units at current price
+                    units = 0 
+                    
+                    signals[i] = -1
+                    in_position = False
 
-
-
-        
-
+    print(f"Final capital: {starting_capital}")
+    print(f"Total trades: {signals.count(1)}")
+    return signals
+            
 
 if __name__ == "__main__":
     # Define the start and end dates for the historical data
     start_date = datetime.now() - timedelta(days=START_DAY_AGO)
     end_date = datetime.now() - timedelta(days=END_DAY_AGO)
 
-    
 
-    # Get historical data
     data = get_historical_data(
         API_KEY,
         SECRET,
@@ -189,34 +262,8 @@ if __name__ == "__main__":
     MACD(data, SHORT_MA_PERIOD, LONG_MA_PERIOD)
     bollinger_bands(data, bollinger_window, bollinger_std_dev)
 
-    backtest(data)
-        
-
-    
-
+    data['Signals'] = backtest(data)
     data.to_csv(f"{TARGET_SYMBOL}_historical_data.csv")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     # Rename columns to match mplfinance
     data.rename(columns={
@@ -241,12 +288,34 @@ if __name__ == "__main__":
     bb_upper = mpf.make_addplot(data['Upper_Band'], color='red', width=0.75)
     bb_lower = mpf.make_addplot(data['Lower_Band'], color='green', width=0.75)
 
+    # Create aligned Series for buy/sell signals
+    buy_marker = pd.Series(np.nan, index=data.index)
+    sell_marker = pd.Series(np.nan, index=data.index)
 
+    # Set Close price only at signal points
+    buy_marker[data['Signals'] == 1] = data['Open']
+    sell_marker[data['Signals'] == -1] = data['Open']
 
-    
+    # Make buy/sell scatter plots
+    buy_plot = mpf.make_addplot(
+        buy_marker,
+        type='scatter',
+        markersize=100,
+        marker='^',
+        color='lime',
+        panel=0
+    )
 
+    sell_plot = mpf.make_addplot(
+        sell_marker,
+        type='scatter',
+        markersize=100,
+        marker='v',
+        color='red',
+        panel=0
+    )
 
-    addplots = [macd_plot, signal_plot, hist_plot, bb_mid, bb_upper, bb_lower]
+    addplots = [macd_plot, signal_plot, hist_plot, bb_mid, bb_upper, bb_lower, buy_plot, sell_plot]
     
     # Ensure all required columns are present and numeric
     for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
