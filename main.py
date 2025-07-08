@@ -49,35 +49,30 @@ def start_quote_stream(api_key, secret_key, symbol):
 def get_historical_data(api_key, secret_key, symbol, startdate=None, endDate=None, daily=False):
     # Create the client
     client = StockHistoricalDataClient(api_key, secret_key)
-    
+    request_params = None
+
     # Create the request
-    if daily:
+    if daily: # If daily data is requested, we get daily bars
         request_params = StockBarsRequest(
             symbol_or_symbols=[symbol],
-            timeframe=TimeFrame.Day,
+            timeframe=TimeFrame.Day,  # Daily bars
             start=startdate,
             end=endDate
         )
     else:
         request_params = StockBarsRequest(
-            symbol_or_symbols=[symbol],
-            timeframe=TimeFrame(MINUTES, TimeFrameUnit.Minute),
-            start=startdate,
-            end=endDate
-        )
+        symbol_or_symbols=[symbol],
+        timeframe=TimeFrame(MINUTES, TimeFrameUnit.Minute),  # variable minute bars
+        start=startdate,
+        end= endDate 
+    )
     
+
     # Fetch bars
     bars = client.get_stock_bars(request_params)
-    
     # Convert the list of bars to a DataFrame
     data = pd.DataFrame([bar.__dict__ for bar in bars[symbol]])
-
-    # Convert 'timestamp' to New York time (Eastern Time)
-    if 'timestamp' in data.columns:
-        data['timestamp'] = pd.to_datetime(data['timestamp'], utc=True)
-        data['timestamp'] = data['timestamp'].dt.tz_convert('America/New_York')
-
-    print("Historical data retrieved (New York time)")
+    print("Historical data retrieved")
     return data
 
 def get_long_posiitions(data, longWindow=LONG_MA_PERIOD):
