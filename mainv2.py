@@ -18,23 +18,23 @@ SHORT_MA_PERIOD = 12
 LONG_MA_PERIOD = 26
 
 bollinger_window = 200  # Bollinger Bands window size
-bollinger_std_dev = 2  # Standard deviation for Bollinger Bands
+bollinger_std_dev = 1.5 # Standard deviation for Bollinger Bands
 
 MACD_UNCERTAINTY_THRESHOLD = 0.0  # percentage threshold for uncertainty in MACD crossovers
 PRICE_UNCERTAINTY_THRESHOLD = 0.0  # percentage threshold for uncertainty in price movements
 
-MACD_SENSITIVITY = 1.0  # percentage threshold for sensitivity in MACD crossovers
-PRICE_SENSITIVITY = 1.0  # percentage threshold for sensitivity in price movements
+MACD_SENSITIVITY = 0  # percentage threshold for sensitivity in MACD crossovers
+PRICE_SENSITIVITY = 0  # percentage threshold for sensitivity in price movements
 
 MINUTES = 1
 HOURS = 1
 
-PERCENTAGE_PROFIT = 1.1  # profit threshold
+PERCENTAGE_PROFIT = 1.01  # profit threshold
 PERCENTAGE_LOSS = 0.95  # loss threshold
 
 
-START_DAY_AGO = 30
-END_DAY_AGO = 3  # 0.5 days ago, so we get the (almost) latest data
+START_DAY_AGO = 220
+END_DAY_AGO = 0.5  # 0.5 days ago, so we get the (almost) latest data
 
 def bollinger_bands(data, window=bollinger_window, std_dev=bollinger_std_dev):
     """
@@ -99,38 +99,20 @@ def get_historical_data(api_key, secret_key, symbol, startdate=None, endDate=Non
     print("Historical data retrieved")
     return data
 
-def get_clusters(data, column='MACD', max_clusters=2):
+def detect_swing(period, column, bloom, window=30):
     """
-    Identify clusters of non-zero values in the specified column.
-    Returns a list of arrays, each containing (index, value) tuples that belong to a cluster.
+    Use the derivative to detect the general trend
     """
-    clusters = []
-    in_cluster = False
-    current_cluster = []
+    ma = period[column].rolling(window=window).mean()
+    deltas = ma.diff()
+    avg_deltas = deltas.mean()
 
-    for i in range(len(data[column]) - 1, -1, -1):
-        if len(clusters) >= max_clusters:
-            break
-
-        value = data[column].iloc[i]
-        if value != 0:
-            if not in_cluster:
-                in_cluster = True
-                current_cluster = [(data.index[i], value)]
-            else:
-                current_cluster.append((data.index[i], value))
-        else:
-            if in_cluster:
-                clusters.append(current_cluster)
-                in_cluster = False
-                current_cluster = []
-
-    # In case the loop ends while still in a cluster
-    if in_cluster:
-        clusters.append(current_cluster)
-
-    return clusters
-    
+    dir = 0
+    if avg_deltas > bloom:
+        dir = 1
+    elif avg_deltas < bloom:
+        dir = -1
+    return dir
 
 
 def backtest(data):
@@ -159,82 +141,38 @@ def backtest(data):
     for i in range(bollinger_window + 1, len(data)):
         # Skip if timestamp is not between 8:30 am and 3:30 pm
         current_time = data.index[i].time()
-        if not (current_time >= datetime.strptime("08:30", "%H:%M").time() and current_time <= datetime.strptime("15:30", "%H:%M").time()):
-            continue
-
         prev_close = data['close'].iloc[i-1]
         current_open = data['open'].iloc[i]
 
-        if current_open > entry_price * PERCENTAGE_PROFIT and in_position:
-            starting_capital += units * entry_price * PERCENTAGE_PROFIT  # Sell all units at current price
-            units = 0 
-                    
+        if((current_open > entry_price * PERCENTAGE_PROFIT and in_position == True) or (in_position == True and current_open < entry_price * PERCENTAGE_LOSS) or (i == len(data) - 1 and in_position == True)):
+            # Sell signal
+            starting_capital += units * current_open
             signals[i] = -1
             in_position = False
+        
+        if not (current_time >= datetime.strptime("08:30", "%H:%M").time() and current_time <= datetime.strptime("15:30", "%H:%M").time() and not in_position):
+            continue
 
-        if current_open < entry_price * PERCENTAGE_LOSS and in_position:
-            starting_capital += units * entry_price * PERCENTAGE_LOSS
-            units = 0
-
-            signals[i] = -1
-            in_position = False
-
-
+        
 
         #first requirement: outside the Bollinger Bands
         if (prev_close < data['Lower_Band'].iloc[i] and in_position == False): # bullish signal
-            clusters = get_clusters(macd_df[:i], column='bearish_h', max_clusters=2)
-            cluster0 = clusters[0] if len(clusters) > 0 else [0]
-            cluster1 = clusters[1] if len(clusters) > 1 else [0]
 
-            #print(f'cluster0: {cluster0}, cluster1: {cluster1}')
-            cluster0_min = min([x[1] for x in cluster0]) 
-            cluster1_min = min([x[1] for x in cluster1])
+            if data['MACD_Histogram'].iloc[i - 1] <= data['MACD_Histogram'].iloc[i - 2]:  # MACD must be bullish
+                continue
 
-            # Extract timestamps of the minimum values in cluster0 and cluster1
-            cluster0_min_idx = cluster0[[x[1] for x in cluster0].index(cluster0_min)][0]
-            cluster1_min_idx = cluster1[[x[1] for x in cluster1].index(cluster1_min)][0]
-            time_diff_minutes = int(abs((cluster0_min_idx - cluster1_min_idx).total_seconds() / 60.0))
+            MACD_direction = detect_swing(macd_df.iloc[i-80:i], 'bullish_h',bloom=MACD_SENSITIVITY , window=20)  # Detect bullish divergence
+            Price_directrion = detect_swing(data.iloc[i-80:i], 'close',bloom=PRICE_SENSITIVITY, window=20)  # Detect price direction
+            
 
-            period = time_diff_minutes
-
-            MACD_divergence_direction = (cluster0_min - cluster1_min)**MACD_SENSITIVITY
-            Price_directrion = (data['Signal_Line'].iloc[i] - data['Signal_Line'].iloc[i-period])**PRICE_SENSITIVITY
-
-            if(MACD_divergence_direction > 0 and Price_directrion < 0):
+            if(MACD_direction == 1 and Price_directrion == -1 and in_position == False):
                 units = starting_capital // current_open  # Calculate how many units we can buy
                 starting_capital -= units * current_open
                 entry_price = current_open
-
                 signals[i] = 1  # Buy signal
                 in_position = True
+        
                 
-        elif (prev_close > data['Upper_Band'].iloc[i]): # bearish signal
-            clusters = get_clusters(macd_df[:i], column='bullish_h', max_clusters=2)
-            cluster0 = clusters[0] if len(clusters) > 0 else [0]
-            cluster1 = clusters[1] if len(clusters) > 1 else [0]
-
-            cluster0_min = max([x[1] for x in cluster0]) 
-            cluster1_min = max([x[1] for x in cluster1])
-
-            # Extract timestamps of the minimum values in cluster0 and cluster1
-            cluster0_min_idx = cluster0[[x[1] for x in cluster0].index(cluster0_min)][0]
-            cluster1_min_idx = cluster1[[x[1] for x in cluster1].index(cluster1_min)][0]
-            time_diff_minutes = int(abs((cluster0_min_idx - cluster1_min_idx).total_seconds() / 60.0))
-
-            period = time_diff_minutes
-
-            MACD_divergence_direction = (cluster0_min - cluster1_min)**MACD_SENSITIVITY
-            Price_directrion = (data['Signal_Line'].iloc[i] - data['Signal_Line'].iloc[i-period])**PRICE_SENSITIVITY
-
-            if(MACD_divergence_direction < 0 and Price_directrion > 0):
-                if in_position:
-                    starting_capital += units * current_open  # Sell all units at current price
-                    units = 0 
-                    
-                    signals[i] = -1
-                    in_position = False
-
     print(f"Final capital: {starting_capital}")
     print(f"Total trades: {signals.count(1)}")
     return signals
@@ -292,30 +230,39 @@ if __name__ == "__main__":
     buy_marker = pd.Series(np.nan, index=data.index)
     sell_marker = pd.Series(np.nan, index=data.index)
 
-    # Set Close price only at signal points
-    buy_marker[data['Signals'] == 1] = data['Open']
-    sell_marker[data['Signals'] == -1] = data['Open']
+    # Only plot buy/sell signals if there are any nonzero signals
+    if (data['Signals'] == 1).any():
+        buy_marker[data['Signals'] == 1] = data['Open']
+        buy_plot = mpf.make_addplot(
+            buy_marker,
+            type='scatter',
+            markersize=100,
+            marker='^',
+            color='lime',
+            panel=0
+        )
+    else:
+        buy_plot = None
 
-    # Make buy/sell scatter plots
-    buy_plot = mpf.make_addplot(
-        buy_marker,
-        type='scatter',
-        markersize=100,
-        marker='^',
-        color='lime',
-        panel=0
-    )
+    if (data['Signals'] == -1).any():
+        sell_marker[data['Signals'] == -1] = data['Open']
+        sell_plot = mpf.make_addplot(
+            sell_marker,
+            type='scatter',
+            markersize=100,
+            marker='v',
+            color='red',
+            panel=0
+        )
+    else:
+        sell_plot = None
 
-    sell_plot = mpf.make_addplot(
-        sell_marker,
-        type='scatter',
-        markersize=100,
-        marker='v',
-        color='red',
-        panel=0
-    )
-
-    addplots = [macd_plot, signal_plot, hist_plot, bb_mid, bb_upper, bb_lower, buy_plot, sell_plot]
+    # Filter out None plots from addplots
+    addplots = [macd_plot, signal_plot, hist_plot, bb_mid, bb_upper, bb_lower]
+    if buy_plot is not None:
+        addplots.append(buy_plot)
+    if sell_plot is not None:
+        addplots.append(sell_plot)
     
     # Ensure all required columns are present and numeric
     for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
