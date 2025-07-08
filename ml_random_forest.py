@@ -6,11 +6,9 @@ from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from datetime import datetime, timedelta
 
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import accuracy_score
-
-from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 import matplotlib.pyplot as plt
-from sklearn.metrics import classification_report
+
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, ConfusionMatrixDisplay
 
 import joblib
 
@@ -159,22 +157,38 @@ def train(df):
 
     # Fit the model and evaluate
     rf_model.fit(X_train, y_train)
-    preds = rf_model.predict(X_test)
-    y_pred = rf_model.predict(X_test)
-
     joblib.dump(rf_model, 'random_forest_trading_model.pkl')
+    
+    probs = rf_model.predict_proba(X_test)
 
-    print("Model trained and saved as 'random_forest_trading_model.pkl'")
-    print("Test Accuracy:", accuracy_score(y_test, preds))
-    print(classification_report(y_test, y_pred, labels=[-1, 1]))
+    confident_preds = []
+    confident_y_true = []
+    threshold = 0.7  # Confidence threshold
 
-    cm = confusion_matrix(y_test, y_pred, labels=[-1, 1])
-    # Visualize it
-    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=[-1, 1])
-    disp.plot(cmap='Blues')
-    plt.title("Confusion Matrix")
-    plt.grid(False)
-    plt.show()
+    for i, prob in enumerate(probs):
+        if prob[1] > threshold:
+            confident_preds.append(1)
+            confident_y_true.append(y_test.iloc[i])
+        elif prob[0] > threshold:
+            confident_preds.append(-1)
+            confident_y_true.append(y_test.iloc[i])
+        # Else: skip — model is unsure
+
+    print(f"Total confident predictions: {len(confident_preds)} / {len(y_test)} ({len(confident_preds)/len(y_test):.2%})")
+
+    # Evaluate only on confident predictions
+    if confident_preds:
+        print("Accuracy on confident predictions:", accuracy_score(confident_y_true, confident_preds))
+        print(classification_report(confident_y_true, confident_preds, labels=[-1, 1]))
+
+        cm = confusion_matrix(confident_y_true, confident_preds, labels=[-1, 1])
+        disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=[-1, 1])
+        disp.plot(cmap='Blues')
+        plt.title("Confusion Matrix (Confident Predictions)")
+        plt.grid(False)
+        plt.show()
+    else:
+        print("No confident predictions at this threshold.")
 
 if __name__ == "__main__":
 
