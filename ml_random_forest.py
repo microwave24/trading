@@ -194,9 +194,9 @@ if __name__ == "__main__":
 
     # Use combined_df for model training
     symbols = ["AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "META", "NFLX", "AMD", "INTC", "SPY", "QQQ"]
-    retrieve_data(symbols)
+    #retrieve_data(symbols)
     df = combine(symbols)
-    df.dropna(inplace=True)  # Ensure no NaN values before training
+    #df.dropna(inplace=True)  # Ensure no NaN values before training
     train(df)
 
 
