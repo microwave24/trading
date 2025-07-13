@@ -48,12 +48,16 @@ def filter_rows(df):
     return df
 
 def aggregate_rows(df, historic_df, bins=50):
-    """Aggregate rows into candles of a specified size."""
-    df = df.with_columns(pl.col('ts_event').cast(pl.Datetime))  # ensure timestamp is datetime
-    df = df.with_columns(pl.col('ts_event').dt.truncate('5m').alias('time_bin'))  # create 5-min bins
+    """Aggregate rows into candles of a specified size, returning an array of (timestamp, footprint) tuples."""
+    # Ensure timestamp is datetime and create 5-min bins
+    df = df.with_columns(
+        pl.col('ts_event').str.strptime(pl.Datetime)
+    )
+    df = df.with_columns(pl.col('ts_event').dt.truncate('5m').alias('time_bin'))
 
-    footprints = []
+    results = []  # To store (time_bin, footprint) tuples
 
+    # Group by time_bin and aggregate all columns
     grouped = df.group_by('time_bin').agg(pl.all()).sort('time_bin')
 
     # Wrap groupby iterator with tqdm for progress bar
@@ -64,17 +68,19 @@ def aggregate_rows(df, historic_df, bins=50):
         if group_df.is_empty():
             continue
 
+        # Get low and high prices from historic_df for the time_bin
         low_price = historic_df.filter(pl.col('timestamp') == time_bin)['low'][0]
         high_price = historic_df.filter(pl.col('timestamp') == time_bin)['high'][0]
 
         if low_price == high_price:
-            continue  # skip flat candles
+            continue  # Skip flat candles
 
-        import numpy as np
+        # Create bin edges for price levels
         bin_edges = np.linspace(low_price, high_price, bins + 1)
         buy_volume = np.zeros(bins)
         sell_volume = np.zeros(bins)
 
+        # Aggregate buy and sell volumes
         for row in group_df.iter_rows(named=True):
             price_level = row['price']
             volume = row['size']
@@ -88,18 +94,23 @@ def aggregate_rows(df, historic_df, bins=50):
             else:
                 sell_volume[bin_idx] += volume
 
+        # Calculate delta and create footprint
         delta = buy_volume - sell_volume
         footprint = np.stack((buy_volume, sell_volume, delta), axis=1)
-        footprints.append(footprint)
+        
+        # Append tuple of (time_bin, footprint)
+        results.append((time_bin, footprint))
 
-    return np.array(footprints)
+    # Convert results to a NumPy array with structured dtype
+    dtype = [('timestamp', 'datetime64[ms]'), ('footprint', float, (bins, 3))]
+    return np.array(results, dtype=dtype)
 
 if __name__ == "__main__":
-    raw_data_path = "extracted_symbols"
+    raw_data_path = "input"
     csv_files = glob.glob(os.path.join(raw_data_path, "*.csv"))
-
-    print("loading data from csv files...")
-    df = pl.read_csv(csv_files[0], n_threads=os.cpu_count() - 2)
+    print("Reading CSV files from:", raw_data_path)
+    print(f'loading {len(csv_files)} CSV files from {raw_data_path}')
+    df = pl.read_csv(csv_files[0], n_threads=os.cpu_count())
     print(f"Loaded data from {csv_files[0]}, shape: {df.shape}")
 
     historic_df = get_historical_data(API_KEY, SECRET, 'TQQQ', startdate=datetime(2025, 5, 12, 7, 55, 0),
@@ -108,5 +119,10 @@ if __name__ == "__main__":
     df = filter_rows(df)
     footprints = aggregate_rows(df, historic_df, bins=50)
 
-    np.save("processed/footprints.npy", footprints)
-    print("Footprints saved to processed/footprints.npy")
+    os.makedirs("output", exist_ok=True)
+    np.save("output/footprints.npy", footprints)
+
+    """ 'footprints.npy' will contain structured data with:
+    - 'timestamp': datetime64[ms] type
+    - 'footprint': a 2D array of shape (50, 3) with buy volume, sell volume, and delta
+    """
