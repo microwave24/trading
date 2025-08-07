@@ -1,11 +1,8 @@
 # === Standard Libraries ===
 import os
-import glob
 from datetime import datetime, timedelta
 import warnings
-import pytz
 from datetime import time
-import ast
 from tqdm import tqdm
 
 # === Warning Suppression ===
@@ -20,21 +17,15 @@ os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 import polars as pl
 import pandas as pd
 import numpy as np
-import seaborn as sns
 
 # === ML Tools ===
 from sklearn.preprocessing import StandardScaler
 from sklearn.compose import ColumnTransformer
 from sklearn.cluster import KMeans
 # === Utilities ===
-import joblib
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import mplfinance as mpf
-from sklearn.decomposition import PCA
-from sklearn.metrics import silhouette_score
-
-
 
 # === Alpaca & Databento ===
 from alpaca.data.historical import StockHistoricalDataClient
@@ -59,7 +50,6 @@ def plot_candlestick(filepath):
     # Localize to UTC and convert to New York time
     df.index = df.index.tz_convert('America/New_York')
 
-    # Rename columns to match mplfinance requirements
     df = df.rename(columns={
         'open': 'Open',
         'high': 'High',
@@ -68,21 +58,23 @@ def plot_candlestick(filepath):
         'volume': 'Volume'
     })
 
-    # Keep only the columns mplfinance expects
-    df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
+    df = df[['Open', 'High', 'Low', 'Close', 'Volume']] # we keep only the necessary columns
 
     # Plot candlestick chart
     mpf.plot(df,
              type='candle',
              style='yahoo',
-             title='TQQQ 5-Minute Candlestick Chart',
+             title='TQQQ 5-Minute Candlestick Chart', # change title as needed
              ylabel='Price',
              ylabel_lower='Volume',
              volume=True)
 
 def get_historical_data(api_key, secret_key, symbol, startDate, endDate, daily=False, t=1):
-    client = StockHistoricalDataClient(api_key, secret_key)
-    timeframe = TimeFrame.Day if daily else TimeFrame(t, TimeFrameUnit.Minute)
+    """
+    This function retrieves historical stock data for a given symbol from Alpaca's API. The raw data is saved to a CSV file.
+    """
+    client = StockHistoricalDataClient(api_key, secret_key) # Initialize the Alpaca client
+    timeframe = TimeFrame.Day if daily else TimeFrame(t, TimeFrameUnit.Minute) # either multi-minute or daily data
 
     request = StockBarsRequest(
         symbol_or_symbols=[symbol],
@@ -90,15 +82,25 @@ def get_historical_data(api_key, secret_key, symbol, startDate, endDate, daily=F
         start=startDate,
         end=endDate
     )
-    bars = client.get_stock_bars(request)
+
+    bars = client.get_stock_bars(request) # actual data
     df = pl.DataFrame([bar.__dict__ for bar in bars[symbol]])
+
     print("Historical data retrieved")
     df.write_csv(f"historic/{symbol}_historic_data_1min.csv")
     print("Done!")
     return df
 
 def process(df, symbol):
-    
+    """
+    This function processes the raw stock data to extract features for analysis and clustering.:
+    - Calculates the average delta (percentage change from open to close)
+    - Computes the slope of the 10-period EMA (Exponential Moving Average)
+    - Calculates the ATR (Average True Range) spread
+    - Computes the ratio of bullish candles to total candles
+    - Counts the number of peaks and troughs in the price data using a zigzag algorithm
+    The processed data is saved to a CSV file.
+    """
     df_processed = pd.DataFrame({
         "timestamp" : df["timestamp"],
         "delta": [0.0] * len(df),
@@ -109,20 +111,18 @@ def process(df, symbol):
         "trough_count": [0] * len(df)
     })
 
-    window_length = 30
+    window_length = 30 # 30 is arbitrary, can be changed --> will do hyperparameter tuning later
 
     for i in range(window_length, len(df)): 
-        row = df.iloc[i]
+        # Extract the window of data
         window = df.iloc[i-window_length:i].copy()
-
 
         # === Avg Delta ===
         open_price = window.iloc[0]['open']
         close_price = window.iloc[-1]['close']
 
         delta =((close_price - open_price) / open_price) * 100
-
-
+        
         # === Slope ===
         ema = window["close"].ewm(span=10, adjust=False).mean()
         avg_slope = ema.diff().dropna().mean()
@@ -132,7 +132,7 @@ def process(df, symbol):
         low = window['low']
         close = window['close']
 
-        # Previous close (shifted)
+        # Previous close
         prev_close = close.shift(1)
 
         # True Range (TR)
@@ -145,7 +145,6 @@ def process(df, symbol):
         spread = tr.std()
 
         # === Candle Ratio
-
         total = len(window)
         positive = (window['close'] > window['open']).sum()
         candle_ratio = positive / total if total > 0 else 0
@@ -164,16 +163,24 @@ def process(df, symbol):
 
     df_processed.dropna()
     df_processed = df_processed[(df_processed != 0).any(axis=1)]
+
     df_processed.to_csv(f"processed/processed_output_{symbol}.csv", index=False)
     return df_processed
 
 def clear_bad(df):
+    """
+    This function removes rows with NaN values and rows where all specified features are zero.
+    """
     df = df.dropna()
     features = ["delta", "avg_ema10_slope", "atr_spread", "candle_ratio", "peak_count", "trough_count"]
     df = df.loc[~(df[features] == 0).all(axis=1)]
 
 
-def avg_atr(df, period=10, avg_window=60):
+def avg_atr(df, period=10, avg_window=30):
+    """ 
+    This function calculates the Average True Range (ATR) for a given DataFrame.
+    The ATR is a measure of volatility, and is calculated as the average of the True Range over a specified period.
+    """
     high = df['high']
     low = df['low']
     close = df['close']
@@ -190,11 +197,14 @@ def avg_atr(df, period=10, avg_window=60):
     return atr[-avg_window:].mean()
 
 def zigzag(window):
-    trend = None # -1 down 1 up
+    """ 
+    This function implements a simple zigzag algorithm to count peaks and troughs in a given window.
+    """
+    trend = None # -1 down 1 up, None is intial state
     last_trend = None
     pivot_index = 0
 
-    threshold = avg_atr(window) *1.5
+    threshold = avg_atr(window) * 1.5 # arbitrary threshold, will do hyperparameter tuning later
     peaks = 0
     valleys = 0
 
@@ -204,6 +214,7 @@ def zigzag(window):
 
         price_change = current["close"] - pivot["close"]
 
+        # Determine trend direction
         if price_change > 0 and abs(price_change) > threshold:
             trend = 1
         elif price_change < 0 and abs(price_change) > threshold:
@@ -211,21 +222,23 @@ def zigzag(window):
         else:
             continue  # Not a significant move yet
 
-        # Count peak or valley if trend changes
+        # Count peak or valley if trend changes, if not we continue without counting as we are still in the same trend
         if trend != last_trend:
             if trend == 1:
                 peaks += 1
             elif trend == -1:
                 valleys += 1
         pivot_index = i
-            
 
+        # Update last trend to current trend
         last_trend = trend
 
     return peaks, valleys
 
 def elbow_method(df, features_to_scale, features_to_pass):
-    # === elbow method to find best num of clusters ===
+    """
+    This function implements the Elbow Method to determine the optimal number of clusters (k) for KMeans clustering.
+    """
     inertia = []
     K_range = range(1, 11)
 
@@ -254,15 +267,19 @@ def elbow_method(df, features_to_scale, features_to_pass):
 
 
 def cluster(df, features_to_scale, features_to_pass):
+    """
+    This function performs KMeans clustering on the given DataFrame using specified features.
+    """
 
+    # === Scale and Transform Data ===
     ct = ColumnTransformer([
         ('scale', StandardScaler(), features_to_scale),
         ('pass', 'passthrough', features_to_pass)
     ])
 
-    X_scaled = ct.fit_transform(df)
-    
+    X_scaled = ct.fit_transform(df) 
 
+    # === KMeans Clustering ===
     k = 3  # from elbow method, k = 3 is best
     kmeans = KMeans(n_clusters=k, random_state=42)
     kmeans.fit(X_scaled)
@@ -270,39 +287,37 @@ def cluster(df, features_to_scale, features_to_pass):
     labels = kmeans.labels_
     df['cluster'] = labels
 
+    # Output the start of each cluster
     for cluster_num in range(k):
         print(f"\nCluster {cluster_num} head:")
         print(df[df['cluster'] == cluster_num].head())
-
-    # Recover original feature names for inverse_transform
-    feature_names = features_to_scale + features_to_pass
-
-    # Inverse-transform the centers back to original scale
-    centers = kmeans.cluster_centers_[:, :len(features_to_scale)]
-
-    centers_passthrough = kmeans.cluster_centers_[:, len(features_to_scale):]
-    centers_combined = np.hstack([centers, centers_passthrough])
-
-    print("\nCluster Centers (original feature scale):")
-    centers_df = pd.DataFrame(centers_combined, columns=feature_names)
-    print(centers_df)
 
     df.to_csv(f"output/clustering_output_TQQQ.csv", index=False)
     return df
     
 
 def assign_clusters(original, clustered):
-    print(original.columns)
-    print(clustered.columns)
+    """
+    This function just copies over the cluster labels from the clustered DataFrame to the original DataFrame.
+    This is done to keep the original/unscaled data intact while adding cluster information.
+    """
     df_merged = original.merge(clustered[['cluster']], left_index=True, right_index=True, how='left')
     df_merged.to_csv(f"output/clustering_output_TQQQ.csv", index=False)
 
 def retrieve_clusters(df, output_path, cluster_count=3):
+    """
+    Optional function to save each cluster's data to a separate CSV file.
+    """
     for i in range(0,cluster_count):
         cluster = df[df['cluster'] == i]
         cluster.to_csv(f"{output_path}/cluster{i}.csv", index=False)
 
 def get_targets(historic, clustered, window):
+    """
+    
+    This function adds the information whether the future close price is higher than the current close price.
+    As of current implementation, target is not used in any machine learning model, but added for future possible use.
+    """
     # Map timestamps to their index positions in `historic`
     historic = historic.reset_index(drop=True)
     clustered = clustered.copy()
@@ -311,7 +326,7 @@ def get_targets(historic, clustered, window):
     # Create a mapping from timestamp to index
     timestamp_to_index = {ts: idx for idx, ts in enumerate(historic['timestamp'])}
 
-    for i in tqdm(range(len(clustered))):
+    for i in tqdm(range(len(clustered))): # tqdm for progress bar
         time_stamp = clustered.at[i, 'timestamp']
 
         current_index = timestamp_to_index.get(time_stamp, None)
@@ -327,6 +342,49 @@ def get_targets(historic, clustered, window):
 
         if future_close > current_close:
             clustered.at[i, 'target'] = 1
+
+    clustered.to_csv("output/clustering_output_TQQQ.csv", index=False)
+
+def get_averages(historic, clustered, window, std_n):
+    """
+    This function calculates the average close price, ATR, and standard deviations for each cluster in the clustered DataFrame.
+    """
+
+    # Map timestamps to their index positions in `historic`
+    historic = historic.reset_index(drop=True)
+    clustered = clustered.copy()
+
+    clustered['avg_close'] = 0.0
+    clustered['atr'] = 0.0
+    clustered['pos_std'] = 0.0
+    clustered['neg_std'] = 0.0
+
+    # Create a mapping from timestamp to index
+    timestamp_to_index = {ts: idx for idx, ts in enumerate(historic['timestamp'])} 
+
+    for i in tqdm(range(len(clustered))): # tqdm for progress bar
+        time_stamp = clustered.at[i, 'timestamp']
+
+        current_index = timestamp_to_index.get(time_stamp, None)
+        if current_index is None:
+            continue
+
+        future_index = current_index + window
+        if future_index >= len(historic):
+            continue
+
+        avg_close = historic['close'][current_index:future_index].mean()
+        clustered.at[i, 'avg_close'] = avg_close
+
+        squared_diffs = (historic['close'][current_index:future_index] - avg_close) ** 2
+        std = np.sqrt(1/ (window - 1) * squared_diffs.sum())
+        pos_std = avg_close + std * std_n
+        neg_std = avg_close - std * std_n
+
+        clustered.at[i, 'pos_std'] = pos_std
+        clustered.at[i, 'neg_std'] = neg_std
+
+        clustered.at[i, 'atr'] = avg_atr(historic.iloc[current_index:future_index])
 
     clustered.to_csv("output/clustering_output_TQQQ.csv", index=False)
 
@@ -360,12 +418,6 @@ if __name__ == "__main__":
     #print("Clustering Successful!")
 
     # === CLUSTERING ===
-    steps = [
-        "Load data",
-        "Compute cluster centers",
-        "Run PCA",
-        "Plot PCA",
-    ]
 
     #progress = tqdm(total=len(steps))
 
@@ -395,18 +447,9 @@ if __name__ == "__main__":
     # === targets
     historic = pd.read_csv("historic/TQQQ_historic_data_1min.csv")
     clustered = pd.read_csv("output/clustering_output_TQQQ.csv")
-    get_targets(historic, clustered, 30)
+    #get_targets(historic, clustered, 30)
+    get_averages(historic, clustered, 30, 2)
     print("Done!")
-
-
-
-    
-
-
-
-    """ From analysis:
-
-    """
 
 
 
