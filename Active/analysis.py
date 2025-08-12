@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 import warnings
 from datetime import time
 from tqdm import tqdm
+import pytz 
 
 # === Warning Suppression ===
 warnings.filterwarnings("ignore", message="no explicit representation of timezones available for np.datetime64")
@@ -45,35 +46,69 @@ SECRET = ""
 # === Data Preperation and Analysis ===
 
 
-def plot_candlestick(filepath):
-    
+
+def plot_candlestick(df):
     # Load CSV and parse dates
-    df = pd.read_csv(filepath, parse_dates=['timestamp'])
+    ## df = pd.read_csv(filepath, parse_dates=['timestamp'])
+
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)  # ensures tz-aware UTC
     
     # Set Datetime as index
     df.set_index('timestamp', inplace=True)
 
-    # Localize to UTC and convert to New York time
-    df.index = df.index.tz_convert('America/New_York')
-
-    df = df.rename(columns={
+    # Rename columns to OHLC format (only rename columns that exist)
+    column_mapping = {
         'open': 'Open',
         'high': 'High',
         'low': 'Low',
-        'close': 'Close',
-        'volume': 'Volume'
-    })
+        'close': 'Close'
+    }
 
-    df = df[['Open', 'High', 'Low', 'Close', 'Volume']] # we keep only the necessary columns
+    df = df.rename(columns=column_mapping)
+    
+
+
+    # Keep only required OHLC columns
+    df = df[['Open', 'High', 'Low', 'Close', "prediction"]]
+    apds = None
+
+    # Create full-length series with NaN for non-matching predictions
+    marker_0 = pd.Series(index=df.index, dtype=float)
+    marker_1 = pd.Series(index=df.index, dtype=float)
+    marker_2 = pd.Series(index=df.index, dtype=float)
+        
+    # Only set values where predictions match
+    cluster0 = df["prediction"] == 0
+    cluster1 = df["prediction"] == 1
+    cluster2 = df["prediction"] == 2
+        
+    marker_0[cluster0] = df['Open'][cluster0]   
+    marker_1[cluster1] = df['Open'][cluster1] 
+    marker_2[cluster2] = df['Open'][cluster2]  
+
+    apds = [
+        mpf.make_addplot(marker_0, type='scatter', markersize=20, marker='o', color='r'),  
+        mpf.make_addplot(marker_1, type='scatter', markersize=20, marker='o', color='b'),
+        mpf.make_addplot(marker_2, type='scatter', markersize=20, marker='o', color='g')  
+    ]
+        
+    # Remove prediction column before plotting (mplfinance only needs OHLC)
+    plot_df = df[['Open', 'High', 'Low', 'Close']]
 
     # Plot candlestick chart
-    mpf.plot(df,
-             type='candle',
-             style='yahoo',
-             title='TQQQ 5-Minute Candlestick Chart', # change title as needed
-             ylabel='Price',
-             ylabel_lower='Volume',
-             volume=True)
+    plot_kwargs = {
+        'type': 'candle',
+        'style': 'yahoo',
+        'title': 'TQQQ 5-Minute Candlestick Chart',
+        'ylabel': 'Price',
+        'volume': False
+    }
+    
+    # Only add addplot if we have markers
+    if apds is not None:
+        plot_kwargs['addplot'] = apds
+    
+    mpf.plot(plot_df, **plot_kwargs)
 
 def get_historical_data(api_key, secret_key, symbol, startDate, endDate, daily=False, t=1):
     """
@@ -428,19 +463,75 @@ def KNN(data):
 
     joblib.dump(knn, "trained_models/knn_model.joblib")
 
-def test():
+
+def predict(historic, window_length):
     # Load the KNN model
     knn = joblib.load("trained_models/knn_model.joblib")
 
     # loop through each window in historic data
+    df = historic
+    out = historic[["timestamp", "open", "high", "low", "close"]].copy()
+    out["prediction"] = -1
+    
 
-    # create the summerized data
+    for i in tqdm(range(window_length, len(historic))):
 
-    # use KNN to predict the cluster for each window
+        # =========== create the summerized data ===========
 
-    # if cluster == 1, use trade_check to check if we should buy or sell
+        # Extract the window of data
+        window = df.iloc[i-window_length:i].copy()
 
-    # output timestamp and action (buy/sell/hold) to a CSV file
+        # === Avg Delta ===
+        open_price = window.iloc[0]['open']
+        close_price = window.iloc[-1]['close']
+
+        delta =((close_price - open_price) / open_price) * 100
+        
+        # === Slope ===
+        ema = window["close"].ewm(span=10, adjust=False).mean()
+        avg_slope = ema.diff().dropna().mean()
+
+        # === ATR Spread ===
+        high = window['high']
+        low = window['low']
+        close = window['close']
+
+        # Previous close
+        prev_close = close.shift(1)
+
+        # True Range (TR)
+        tr = pd.concat([
+            (high - low),
+            (high - prev_close).abs(),
+            (low - prev_close).abs()
+        ], axis=1).max(axis=1)
+
+        spread = tr.std()
+
+        # === Candle Ratio
+        total = len(window)
+        positive = (window['close'] > window['open']).sum()
+        candle_ratio = positive / total if total > 0 else 0
+
+        # === number of peaks
+        p, t = zigzag(window)
+
+        summerized = pd.DataFrame({
+            "delta": [delta],
+            "avg_ema10_slope": [avg_slope],
+            "atr_spread": [spread],
+            "candle_ratio": [candle_ratio],
+            "peak_count": [p],
+            "trough_count": [t]
+        })
+
+        # use KNN to predict the cluster for each window
+
+        prediction = knn.predict(summerized)
+        out.at[i, "prediction"] = prediction[0]
+    out.to_csv("output/historic_predicted_TQQQ.csv", index=False)
+    print("Predictions Allocated!")
+
 
     
 
@@ -505,8 +596,26 @@ if __name__ == "__main__":
     #get_targets(historic, clustered, 30)
     #get_averages(historic, clustered, 30, 2)
 
-    clustered = pd.read_csv("output/clustering_output_TQQQ.csv")
-    KNN(clustered)
+    #clustered = pd.read_csv("output/clustering_output_TQQQ.csv")
+    #KNN(clustered)
+
+    #historic = pd.read_csv("historic/TQQQ_historic_data_1min.csv")
+    #predict(historic, 30)
+
+    df = pd.read_csv("output/historic_predicted_TQQQ.csv")
+
+    startdate = datetime(2025, 7, 1, 13, 30, 0, tzinfo=pytz.UTC)
+    enddate = datetime(2025, 7, 30, 20, 30, 0, tzinfo=pytz.UTC)
+
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+
+    df_filtered = df[
+
+        (df["timestamp"] >= startdate) &
+        (df["timestamp"] <= enddate)
+    ]
+
+    plot_candlestick(df_filtered)
     print("Done!")
 
 
