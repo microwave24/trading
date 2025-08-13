@@ -428,12 +428,11 @@ def get_averages(historic, clustered, window, std_n):
     clustered.to_csv("output/clustering_output_TQQQ.csv", index=False)
 
 
-def trade_check(current_price=0.0, entry_price=0.0, in_position=False, window=None, std_n=2, atr_threshold=1.5, ):
+def trade_check(current_price=0.0, entry_price=0.0, in_position=False, window=None, std_n=2, atr_threshold_tp=1.5, atr_threshold_sl=0.5):
     """
     This function checks if the current price is within the standard deviation bounds and ATR threshold.
     It returns True if the conditions are met, otherwise False.
     """
-    current_price = window.iloc[-1]['close']
     avg_close = window['close'].mean()
 
     squared_diffs = (window['close'] - avg_close) ** 2
@@ -441,12 +440,12 @@ def trade_check(current_price=0.0, entry_price=0.0, in_position=False, window=No
     pos_std = avg_close + std * std_n
     neg_std = avg_close - std * std_n
 
-    atr = avg_atr(window, period=10, avg_window=30) * atr_threshold
+    atr = avg_atr(window, period=10, avg_window=30)
 
     if in_position == True:
-        if current_price >= pos_std or current_price >= entry_price + atr: # sell requirement 1: threshold reached
+        if current_price >= pos_std or current_price >= entry_price + atr*atr_threshold_tp: # sell requirement 1: threshold reached
             return -1
-        if current_price <= entry_price - atr: # sell requirement 2: stop loss
+        if current_price <= entry_price - atr*atr_threshold_sl: # sell requirement 2: stop loss
             return -1
     else:
         if current_price <= neg_std:
@@ -532,6 +531,139 @@ def predict(historic, window_length):
     out.to_csv("output/historic_predicted_TQQQ.csv", index=False)
     print("Predictions Allocated!")
 
+def execute_trades(historic_predicted, window_length):
+    # performance
+    capital = 10000.000  # Starting capital
+    quantity = 0  # Number of shares held
+    wins = 0  # Number of winning trades
+    total_trades = 0  # Total number of trades
+    
+    # Drawdown tracking
+    peak_capital = capital  # Track the highest capital reached
+    max_drawdown = 0.0  # Maximum drawdown percentage
+    capital_history = []  # Track capital over time
+
+    # Create working copy
+    df = historic_predicted.copy()
+    
+    # Reset index to ensure integer indexing works properly
+    df = df.reset_index(drop=True)
+    
+    # Initialize signals column
+    df["signals"] = 0  # Simpler initialization
+    
+    # Trading variables
+    in_position = False
+    entry_price = 0.0
+    
+    print(f"Starting execution with {len(df)} rows")
+    print(f"DataFrame columns: {df.columns.tolist()}")
+    
+    for i in tqdm(range(window_length, len(df))):  # Include last row
+        
+        # Extract window
+        window = df.iloc[i-window_length:i].copy()
+        
+        # Use consistent dataframe
+        current_price = df.iloc[i]['open']
+        
+        # Calculate current portfolio value (capital + position value)
+        if in_position:
+            current_portfolio_value = capital + (quantity * current_price)
+        else:
+            current_portfolio_value = capital
+        
+        # Update peak and calculate drawdown
+        if current_portfolio_value > peak_capital:
+            peak_capital = current_portfolio_value
+        
+        current_drawdown = ((peak_capital - current_portfolio_value) / peak_capital) * 100
+        if current_drawdown > max_drawdown:
+            max_drawdown = current_drawdown
+        
+        # Store capital history for analysis
+        capital_history.append(current_portfolio_value)
+        
+        # Get trade signal
+        trade = trade_check(
+            current_price=current_price, 
+            entry_price=entry_price, 
+            in_position=in_position, 
+            window=window, 
+            std_n=2,
+            atr_threshold_sl=1,
+            atr_threshold_tp=1
+        )
+        type0_counts = (window["prediction"] == 0).sum()
+        type1_counts = (window["prediction"] == 1).sum()
+        type2_counts = (window["prediction"] == 2).sum()
+        
+        # Entry logic
+        if (trade == 1 and not in_position and df.iloc[i-1]["prediction"] != 0):  # Ensure enough type1 predictions in the window
+
+            entry_price = current_price
+            quantity = capital // current_price  # Calculate how many shares we can buy
+            capital -= quantity * current_price  # Deduct the cost from capital
+            total_trades += 1  # Increment total trades
+
+            in_position = True
+            df.iloc[i, df.columns.get_loc("signals")] = 1  # More explicit assignment
+            entry_price = current_price
+            
+        # Exit logic
+        elif trade == -1 and in_position:
+
+            # Calculate profit/loss
+            capital += quantity * current_price  # Add the value of sold shares to capital
+            quantity = 0  # Reset quantity as we sold all shares
+
+            if entry_price < current_price:
+                wins += 1
+
+            df.iloc[i, df.columns.get_loc("signals")] = -1  # More explicit assignment
+            in_position = False
+    
+    # Final portfolio value calculation
+    final_price = df.iloc[-1]['open'] if in_position else 0
+    final_portfolio_value = capital + (quantity * final_price if in_position else 0)
+    
+    # Check results before saving
+    entry_count = (df["signals"] == 1).sum()
+    exit_count = (df["signals"] == -1).sum()
+    print(f"Entry signals: {entry_count}")
+    print(f"Exit signals: {exit_count}")
+    print(f"DataFrame shape before saving: {df.shape}")
+
+    # Performance metrics
+    total_return = ((final_portfolio_value - 10000.0) / 10000.0) * 100
+    winrate = (wins / total_trades * 100) if total_trades > 0 else 0
+    
+    print(f"\n=== PERFORMANCE METRICS ===")
+    print(f"Starting capital: $10,000.00")
+    print(f"Final portfolio value: ${final_portfolio_value:.2f}")
+    print(f"Total return: {total_return:.2f}%")
+    print(f"Total trades: {total_trades}")
+    print(f"Win rate: {winrate:.2f}%")
+    print(f"Maximum drawdown: {max_drawdown:.2f}%")
+    
+    # Save to CSV
+    df.to_csv("output/historic_predicted_with_signals_TQQQ.csv", index=False)
+    print("Saved to CSV")
+    
+    return {
+        'df': df,
+        'final_capital': final_portfolio_value,
+        'total_return': total_return,
+        'max_drawdown': max_drawdown,
+        'winrate': winrate,
+        'total_trades': total_trades,
+        'capital_history': capital_history
+    }
+            
+
+
+
+
 
     
 
@@ -615,7 +747,9 @@ if __name__ == "__main__":
         (df["timestamp"] <= enddate)
     ]
 
-    plot_candlestick(df_filtered)
+    execute_trades(df_filtered, window_length=30)
+
+    #plot_candlestick(df_filtered)
     print("Done!")
 
 
