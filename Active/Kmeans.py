@@ -4,13 +4,19 @@ from datetime import datetime, timedelta
 import warnings
 from datetime import time
 from tqdm import tqdm
-import pytz 
+import pytz
+from concurrent.futures import ProcessPoolExecutor, as_completed
+
+from sklearn.exceptions import InconsistentVersionWarning
 
 # === Warning Suppression ===
 warnings.filterwarnings("ignore", message="no explicit representation of timezones available for np.datetime64")
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="matplotlib.backends._backend_tk")
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="matplotlib.backends._backend_tk")
 warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+warnings.filterwarnings("ignore", category=InconsistentVersionWarning)
+
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 
@@ -69,27 +75,43 @@ def plot_candlestick(df):
 
 
     # Keep only required OHLC columns
-    df = df[['Open', 'High', 'Low', 'Close', "prediction"]]
+    df = df[['Open', 'High', 'Low', 'Close', 'prediction', 'signals']]
     apds = None
 
     # Create full-length series with NaN for non-matching predictions
+
+    marker_0 = np.full(len(df), np.nan)
+    marker_1 = np.full(len(df), np.nan)
+    marker_2 = np.full(len(df), np.nan)
+
     marker_0 = pd.Series(index=df.index, dtype=float)
     marker_1 = pd.Series(index=df.index, dtype=float)
     marker_2 = pd.Series(index=df.index, dtype=float)
-        
+
     # Only set values where predictions match
     cluster0 = df["prediction"] == 0
     cluster1 = df["prediction"] == 1
     cluster2 = df["prediction"] == 2
+
+    buy_r = df["signals"] == 1
+    sell_r = df["signals"] == -1
         
     marker_0[cluster0] = df['Open'][cluster0]   
     marker_1[cluster1] = df['Open'][cluster1] 
     marker_2[cluster2] = df['Open'][cluster2]  
 
+    buy_marker = pd.Series(np.nan, index=df.index)
+    sell_marker = pd.Series(np.nan, index=df.index)
+
+    buy_marker[buy_r] = df['Open'][buy_r]
+    sell_marker[sell_r] = df['Open'][sell_r]
+
     apds = [
-        mpf.make_addplot(marker_0, type='scatter', markersize=20, marker='o', color='r'),  
-        mpf.make_addplot(marker_1, type='scatter', markersize=20, marker='o', color='b'),
-        mpf.make_addplot(marker_2, type='scatter', markersize=20, marker='o', color='g')  
+        #mpf.make_addplot(marker_0, type='scatter', markersize=20, marker='o', color='g'),  
+        #mpf.make_addplot(marker_1, type='scatter', markersize=20, marker='o', color='b'),
+        #mpf.make_addplot(marker_2, type='scatter', markersize=20, marker='o', color='r'),
+        mpf.make_addplot(buy_marker, type='scatter', markersize=50, marker='^', color='lime', panel=0),
+        mpf.make_addplot(sell_marker, type='scatter', markersize=50, marker='v', color='red', panel=0)  
     ]
         
     # Remove prediction column before plotting (mplfinance only needs OHLC)
@@ -428,28 +450,25 @@ def get_averages(historic, clustered, window, std_n):
     clustered.to_csv("output/clustering_output_TQQQ.csv", index=False)
 
 
-def trade_check(current_price=0.0, entry_price=0.0, in_position=False, window=None, std_n=2, atr_threshold_tp=1.5, atr_threshold_sl=0.5):
-    """
-    This function checks if the current price is within the standard deviation bounds and ATR threshold.
-    It returns True if the conditions are met, otherwise False.
-    """
+def trade_check(current_price, entry_price, window, in_pos, std_n=2, atr_threshold_tp=1.5, atr_threshold_sl=0.5):
     avg_close = window['close'].mean()
-
     squared_diffs = (window['close'] - avg_close) ** 2
-    std = np.sqrt(1/ (len(window) - 1) * squared_diffs.sum())
+    std = np.sqrt(1 / (len(window) - 1) * squared_diffs.sum())
     pos_std = avg_close + std * std_n
     neg_std = avg_close - std * std_n
 
     atr = avg_atr(window, period=10, avg_window=30)
 
-    if in_position == True:
-        if current_price >= pos_std or current_price >= entry_price + atr*atr_threshold_tp: # sell requirement 1: threshold reached
+    if in_pos:
+        if current_price >= entry_price + atr * atr_threshold_tp:
             return -1
-        if current_price <= entry_price - atr*atr_threshold_sl: # sell requirement 2: stop loss
+        elif current_price <= entry_price - atr * atr_threshold_sl:
             return -1
     else:
         if current_price <= neg_std:
             return 1
+
+    return 0
 
 def KNN(data):
     # Features (exclude timestamp and cluster)
@@ -463,75 +482,71 @@ def KNN(data):
     joblib.dump(knn, "trained_models/knn_model.joblib")
 
 
-def predict(historic, window_length):
-    # Load the KNN model
-    knn = joblib.load("trained_models/knn_model.joblib")
+def predict(window, window_length, cluster_centers, distance_threshold):
+    prediction = -1
 
-    # loop through each window in historic data
-    df = historic
-    out = historic[["timestamp", "open", "high", "low", "close"]].copy()
-    out["prediction"] = -1
+    # === Avg Delta ===
+    open_price = window.iloc[0]['open']
+    close_price = window.iloc[-1]['close']
+
+    delta = ((close_price - open_price) / open_price) * 100
+
+    # === Slope ===
+    ema = window["close"].ewm(span=10, adjust=False).mean()
+    avg_slope = ema.diff().dropna().mean()
+
+    # === ATR Spread ===
+    high = window['high']
+    low = window['low']
+    close = window['close']
+
+    # Previous close
+    prev_close = close.shift(1)
+
+    # True Range (TR)
+    tr = pd.concat([
+        (high - low),
+        (high - prev_close).abs(),
+        (low - prev_close).abs()
+    ], axis=1).max(axis=1)
+
+    spread = tr.std()
+
+    # === Candle Ratio
+    total = len(window)
+    positive = (window['close'] > window['open']).sum()
+    candle_ratio = positive / total if total > 0 else 0
+
+    # === number of peaks
+    p, t = zigzag(window)
+
+    summerized = pd.DataFrame({
+        "delta": [delta],
+        "avg_ema10_slope": [avg_slope],
+        "atr_spread": [spread],
+        "candle_ratio": [candle_ratio],
+        "peak_count": [p],
+        "trough_count": [t]
+    })
+
+    # Find the closest cluster center using Euclidean distance
+    min_dist = np.inf  # Initialize with a large value
+    prediction = -1
+    for cluster in cluster_centers.index:
+        
+        center_row = cluster_centers.loc[cluster, ["delta", "avg_ema10_slope", "atr_spread", 
+                                           "candle_ratio", "peak_count", "trough_count"]]
+        dist = np.linalg.norm(summerized.values.flatten() - center_row.values)
+
+        if dist < distance_threshold and dist < min_dist:  # Check if within threshold
+            prediction = cluster  # Assign the cluster label
+            min_dist = dist
+
+
+    return prediction
     
 
-    for i in tqdm(range(window_length, len(historic))):
-
-        # =========== create the summerized data ===========
-
-        # Extract the window of data
-        window = df.iloc[i-window_length:i].copy()
-
-        # === Avg Delta ===
-        open_price = window.iloc[0]['open']
-        close_price = window.iloc[-1]['close']
-
-        delta =((close_price - open_price) / open_price) * 100
-        
-        # === Slope ===
-        ema = window["close"].ewm(span=10, adjust=False).mean()
-        avg_slope = ema.diff().dropna().mean()
-
-        # === ATR Spread ===
-        high = window['high']
-        low = window['low']
-        close = window['close']
-
-        # Previous close
-        prev_close = close.shift(1)
-
-        # True Range (TR)
-        tr = pd.concat([
-            (high - low),
-            (high - prev_close).abs(),
-            (low - prev_close).abs()
-        ], axis=1).max(axis=1)
-
-        spread = tr.std()
-
-        # === Candle Ratio
-        total = len(window)
-        positive = (window['close'] > window['open']).sum()
-        candle_ratio = positive / total if total > 0 else 0
-
-        # === number of peaks
-        p, t = zigzag(window)
-
-        summerized = pd.DataFrame({
-            "delta": [delta],
-            "avg_ema10_slope": [avg_slope],
-            "atr_spread": [spread],
-            "candle_ratio": [candle_ratio],
-            "peak_count": [p],
-            "trough_count": [t]
-        })
-
-        # use KNN to predict the cluster for each window
-
-        prediction = knn.predict(summerized)
-        out.at[i, "prediction"] = prediction[0]
-    out.to_csv("output/historic_predicted_TQQQ.csv", index=False)
-    print("Predictions Allocated!")
-
-def execute_trades(historic_predicted, window_length):
+def backtest(predicted, window_length):
     # performance
     capital = 10000.000  # Starting capital
     quantity = 0  # Number of shares held
@@ -543,32 +558,30 @@ def execute_trades(historic_predicted, window_length):
     max_drawdown = 0.0  # Maximum drawdown percentage
     capital_history = []  # Track capital over time
 
-    # Create working copy
-    df = historic_predicted.copy()
-    
-    # Reset index to ensure integer indexing works properly
+    df = predicted.copy()  # Use the predicted DataFrame
     df = df.reset_index(drop=True)
-    
     # Initialize signals column
-    df["signals"] = 0  # Simpler initialization
+    df["signals"] = 0  # Initialize with zeros
     
     # Trading variables
-    in_position = False
+    in_pos = False
     entry_price = 0.0
     
     print(f"Starting execution with {len(df)} rows")
     print(f"DataFrame columns: {df.columns.tolist()}")
     
     for i in tqdm(range(window_length, len(df))):  # Include last row
-        
+
         # Extract window
-        window = df.iloc[i-window_length:i].copy()
-        
+        window = df.iloc[i-window_length:i]
+
+        prediction = df.iloc[i]['prediction']
+
         # Use consistent dataframe
         current_price = df.iloc[i]['open']
         
         # Calculate current portfolio value (capital + position value)
-        if in_position:
+        if in_pos:
             current_portfolio_value = capital + (quantity * current_price)
         else:
             current_portfolio_value = capital
@@ -587,51 +600,44 @@ def execute_trades(historic_predicted, window_length):
         # Get trade signal
         trade = trade_check(
             current_price=current_price, 
-            entry_price=entry_price, 
-            in_position=in_position, 
-            window=window, 
+            entry_price=entry_price,  
+            window=window,
+            in_pos=in_pos, 
             std_n=2,
-            atr_threshold_sl=1,
-            atr_threshold_tp=1
+            atr_threshold_sl=1.5,
+            atr_threshold_tp=2
         )
-        type0_counts = (window["prediction"] == 0).sum()
-        type1_counts = (window["prediction"] == 1).sum()
-        type2_counts = (window["prediction"] == 2).sum()
+
         
+
+    
         # Entry logic
-        if (trade == 1 and not in_position and df.iloc[i-1]["prediction"] != 0):  # Ensure enough type1 predictions in the window
+        if in_pos == False:
+            if trade == 1 and prediction != 2 and prediction != -1:
+                # Enter
+                in_pos = True
+                entry_price = current_price
+                quantity = capital // current_price
+                capital -= quantity * current_price
+                total_trades += 1
+                df.loc[i, "signals"] = 1
 
-            entry_price = current_price
-            quantity = capital // current_price  # Calculate how many shares we can buy
-            capital -= quantity * current_price  # Deduct the cost from capital
-            total_trades += 1  # Increment total trades
-
-            in_position = True
-            df.iloc[i, df.columns.get_loc("signals")] = 1  # More explicit assignment
-            entry_price = current_price
-            
-        # Exit logic
-        elif trade == -1 and in_position:
-
-            # Calculate profit/loss
-            capital += quantity * current_price  # Add the value of sold shares to capital
-            quantity = 0  # Reset quantity as we sold all shares
-
-            if entry_price < current_price:
-                wins += 1
-
-            df.iloc[i, df.columns.get_loc("signals")] = -1  # More explicit assignment
-            in_position = False
+        else:  # already in position
+            if (trade == -1 and prediction != 0) or prediction == 2:  # allow forced exit on down trend
+                # Exit
+                capital += quantity * current_price
+                if current_price > entry_price:
+                    wins += 1
+                quantity = 0
+                in_pos = False
+                entry_price = 0
+                df.loc[i, "signals"] = -1
     
     # Final portfolio value calculation
-    final_price = df.iloc[-1]['open'] if in_position else 0
-    final_portfolio_value = capital + (quantity * final_price if in_position else 0)
+    final_price = df.iloc[-1]['open'] if in_pos else 0
+    final_portfolio_value = capital + (quantity * final_price if in_pos else 0)
     
     # Check results before saving
-    entry_count = (df["signals"] == 1).sum()
-    exit_count = (df["signals"] == -1).sum()
-    print(f"Entry signals: {entry_count}")
-    print(f"Exit signals: {exit_count}")
     print(f"DataFrame shape before saving: {df.shape}")
 
     # Performance metrics
@@ -660,15 +666,6 @@ def execute_trades(historic_predicted, window_length):
         'capital_history': capital_history
     }
             
-
-
-
-
-
-    
-
-
-
 if __name__ == "__main__":
     # === RAW DATA RETRIEVAL ===
     
@@ -688,25 +685,35 @@ if __name__ == "__main__":
     #df = pd.read_csv("processed/processed_output_TQQQ.csv")
     #clear_bad(df)
 
+    # Split df into training and testing sets (first 80% for training)
+    #split_idx = int(len(df) * 0.8)
+
+    #train_df = df.iloc[:split_idx].reset_index(drop=True)
+    #test_df = df.iloc[split_idx:].reset_index(drop=True)
+
     #features_to_scale = ['delta', 'avg_ema10_slope', 'candle_ratio', 'peak_count', 'trough_count']
     #features_to_pass = ['atr_spread']
 
-    #elbow_method(df, features_to_scale, features_to_pass)
-    #assign_clusters(pd.read_csv("processed/processed_output_TQQQ.csv"), cluster(df, features_to_scale, features_to_pass))
+    #elbow_method(train_df, features_to_scale, features_to_pass)
+
+    #test_df.to_csv("processed/test_output_TQQQ.csv", index=False)
+    #train_df.to_csv("processed/trained_output_TQQQ.csv", index=False)
+
+    #assign_clusters(pd.read_csv("processed/processed_output_TQQQ.csv"), cluster(train_df, features_to_scale, features_to_pass))
     #print("Clustering Successful!")
 
-    # === CLUSTERING ===
 
     #progress = tqdm(total=len(steps))
 
-    #df = pd.read_csv("output/clustering_output_TQQQ.csv")
+    df = pd.read_csv("output/clustering_output_TQQQ.csv")
     #progress.update(1)
     #retrieve_clusters(df, 'output', 3)
 
     # === Cluster centers ===
     #print("Retrieving cluster centers")
-    #cluster_summary = df.drop(columns=['timestamp']).groupby('cluster').mean()
-    #print(cluster_summary)
+    cluster_summary = df.drop(columns=['timestamp']).groupby('cluster').mean()
+    print("Cluster centers:")
+    print(cluster_summary)
     #progress.update(1)
 
     # === PCA analysis ===
@@ -722,35 +729,47 @@ if __name__ == "__main__":
     #plt.savefig("output/pca_clusters.png", dpi=300, bbox_inches='tight')  # Save the figure
     #progress.update(1)
 
-    # === KNN CLASSIFIER ===
-    #historic = pd.read_csv("historic/TQQQ_historic_data_1min.csv")
-    
-    #get_targets(historic, clustered, 30)
-    #get_averages(historic, clustered, 30, 2)
 
-    #clustered = pd.read_csv("output/clustering_output_TQQQ.csv")
-    #KNN(clustered)
+    predict_ = False
+    if predict_:
+        historic = pd.read_csv("historic/TQQQ_historic_data_1min.csv")
 
-    #historic = pd.read_csv("historic/TQQQ_historic_data_1min.csv")
-    #predict(historic, 30)
+        historic["timestamp"] = pd.to_datetime(historic["timestamp"], utc=True)
 
-    df = pd.read_csv("output/historic_predicted_TQQQ.csv")
+        startdate = datetime(2024, 5, 1, 13, 30, 0, tzinfo=pytz.UTC)
+        enddate = datetime(2025, 6, 30, 20, 30, 0, tzinfo=pytz.UTC)
 
-    startdate = datetime(2025, 7, 1, 13, 30, 0, tzinfo=pytz.UTC)
-    enddate = datetime(2025, 7, 30, 20, 30, 0, tzinfo=pytz.UTC)
 
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
+        historic = historic[
+            (historic["timestamp"] >= startdate) &
+            (historic["timestamp"] <= enddate)
+        ]
 
-    df_filtered = df[
+        historic.set_index("timestamp", inplace=True)
 
-        (df["timestamp"] >= startdate) &
-        (df["timestamp"] <= enddate)
-    ]
+        # === PREDICTION ===
+        print("Starting prediction...")
 
-    execute_trades(df_filtered, window_length=30)
+        historic['prediction'] = -1
+        pred_col = historic.columns.get_loc('prediction')
+        for i in tqdm(range(30, len(historic))):
+            window = historic.iloc[i-30:i]
+            prediction =  predict(window, 30, cluster_summary, 1.5)
+            historic.iloc[i, pred_col] = prediction
+        historic.to_csv("output/test_predicted_TQQQ.csv", index=True)
 
-    #plot_candlestick(df_filtered)
-    print("Done!")
+        print(f'number of predictions: {len(historic)}')
+        print(f'number of predictions with -1: {len(historic[historic["prediction"] == -1])}')
+        print(f'number of predictions with 0: {len(historic[historic["prediction"] == 0])}')
+        print(f'number of predictions with 1: {len(historic[historic["prediction"] == 1])}')
+        print(f'number of predictions with 2: {len(historic[historic["prediction"] == 2])}')
+
+
+    predicted = pd.read_csv("output/test_predicted_TQQQ.csv")
+    backtest(predicted, window_length=30)
+    plot = pd.read_csv("output\historic_predicted_with_signals_TQQQ.csv")
+    plot_candlestick(plot)
+    #print("Done!")
 
 
 
