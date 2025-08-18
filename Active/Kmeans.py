@@ -305,13 +305,10 @@ def elbow_method(df, features_to_scale, features_to_pass):
     inertia = []
     K_range = range(1, 11)
 
-    ct = ColumnTransformer([
-        ('scale', StandardScaler(), features_to_scale),
-        ('pass', 'passthrough', features_to_pass)
-    ])
-
-
-    X_scaled = ct.fit_transform(df)
+    df.dropna(inplace=True)  # Ensure no NaN values before scaling
+    # === Scale only the numeric features ===
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(df[features_to_scale])
 
     for k in K_range:
         kmeans = KMeans(n_clusters=k, random_state=42)
@@ -333,14 +330,10 @@ def cluster(df, features_to_scale, features_to_pass):
     """
     This function performs KMeans clustering on the given DataFrame using specified features.
     """
-
-    # === Scale and Transform Data ===
-    ct = ColumnTransformer([
-        ('scale', StandardScaler(), features_to_scale),
-        ('pass', 'passthrough', features_to_pass)
-    ])
-
-    X_scaled = ct.fit_transform(df) 
+    df_clean = df.dropna(subset=features_to_scale).copy()
+    # === Scale only the numeric features ===
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(df[features_to_scale])
 
     # === KMeans Clustering ===
     k = 3  # from elbow method, k = 3 is best
@@ -348,24 +341,21 @@ def cluster(df, features_to_scale, features_to_pass):
     kmeans.fit(X_scaled)
 
     labels = kmeans.labels_
-    df['cluster'] = labels
-
-    # Output the start of each cluster
-    for cluster_num in range(k):
-        print(f"\nCluster {cluster_num} head:")
-        print(df[df['cluster'] == cluster_num].head())
+    df.loc[:, 'cluster'] = labels
 
     df.to_csv(f"output/clustering_output_TQQQ.csv", index=False)
     return df
     
 
-def assign_clusters(original, clustered):
+def assign_clusters(historic, clustered):
     """
     This function just copies over the cluster labels from the clustered DataFrame to the original DataFrame.
     This is done to keep the original/unscaled data intact while adding cluster information.
     """
-    df_merged = original.merge(clustered[['cluster']], left_index=True, right_index=True, how='left')
-    df_merged.to_csv(f"output/clustering_output_TQQQ.csv", index=False)
+    df_merged = historic.merge(clustered[['cluster']], left_index=True, right_index=True, how='left')
+    df_merged.to_csv(f"output/historic_clustering_output_TQQQ.csv", index=False)
+    return df_merged
+
 
 def retrieve_clusters(df, output_path, cluster_count=3):
     """
@@ -375,89 +365,20 @@ def retrieve_clusters(df, output_path, cluster_count=3):
         cluster = df[df['cluster'] == i]
         cluster.to_csv(f"{output_path}/cluster{i}.csv", index=False)
 
-def get_targets(historic, clustered, window):
-    """
-    This function adds the information whether the future close price is higher than the current close price.
-    As of current implementation, target is not used in any machine learning model, but added for future possible use.
-    """
-    # Map timestamps to their index positions in `historic`
-    historic = historic.reset_index(drop=True)
-    clustered = clustered.copy()
-    clustered['target'] = 0
-
-    # Create a mapping from timestamp to index
-    timestamp_to_index = {ts: idx for idx, ts in enumerate(historic['timestamp'])}
-
-    for i in tqdm(range(len(clustered))): # tqdm for progress bar
-        time_stamp = clustered.at[i, 'timestamp']
-
-        current_index = timestamp_to_index.get(time_stamp, None)
-        if current_index is None:
-            continue
-
-        future_index = current_index + window
-        if future_index >= len(historic):
-            continue
-
-        current_close = historic.at[current_index, 'close']
-        future_close = historic.at[future_index, 'close']
-
-        if future_close > current_close:
-            clustered.at[i, 'target'] = 1
-
-    clustered.to_csv("output/clustering_output_TQQQ.csv", index=False)
-
-def get_averages(historic, clustered, window, std_n):
-    """
-    This function calculates the average close price, ATR, and standard deviations for each cluster in the clustered DataFrame.
-    """
-    # Map timestamps to their index positions in `historic`
-    historic = historic.reset_index(drop=True)
-    clustered = clustered.copy()
-
-    clustered['avg_close'] = 0.0
-    clustered['atr'] = 0.0
-    clustered['pos_std'] = 0.0
-    clustered['neg_std'] = 0.0
-
-    # Create a mapping from timestamp to index
-    timestamp_to_index = {ts: idx for idx, ts in enumerate(historic['timestamp'])} 
-
-    for i in tqdm(range(len(clustered))): # tqdm for progress bar
-        time_stamp = clustered.at[i, 'timestamp']
-
-        current_index = timestamp_to_index.get(time_stamp, None)
-        if current_index is None:
-            continue
-
-        future_index = current_index + window
-        if future_index >= len(historic):
-            continue
-
-        avg_close = historic['close'][current_index:future_index].mean()
-        clustered.at[i, 'avg_close'] = avg_close
-
-        squared_diffs = (historic['close'][current_index:future_index] - avg_close) ** 2
-        std = np.sqrt(1/ (window - 1) * squared_diffs.sum())
-        pos_std = avg_close + std * std_n
-        neg_std = avg_close - std * std_n
-
-        clustered.at[i, 'pos_std'] = pos_std
-        clustered.at[i, 'neg_std'] = neg_std
-
-        clustered.at[i, 'atr'] = avg_atr(historic.iloc[current_index:future_index])
-
-    clustered.to_csv("output/clustering_output_TQQQ.csv", index=False)
 
 
-def trade_check(current_price, entry_price, window, in_pos, std_n=2, atr_threshold_tp=1.5, atr_threshold_sl=0.5):
-    avg_close = window['close'].mean()
-    squared_diffs = (window['close'] - avg_close) ** 2
-    std = np.sqrt(1 / (len(window) - 1) * squared_diffs.sum())
-    pos_std = avg_close + std * std_n
-    neg_std = avg_close - std * std_n
 
-    atr = avg_atr(window, period=10, avg_window=30)
+
+def trade_check(i, current_price, entry_price, in_pos, df, atr_threshold_tp=1.5, atr_threshold_sl=0.5, std_n=2):
+    std = df.at[i, "roll_std"]
+    mean = df.at[i, "mean"]
+
+    pos_std = mean + std_n * std
+    neg_std = mean - std_n * std
+    atr = df.at[i, "avg_atr"]
+
+    if pd.isna(pos_std) or pd.isna(atr):
+        return 0  # skip until rolling windows are valid
 
     if in_pos:
         if current_price >= entry_price + atr * atr_threshold_tp:
@@ -467,22 +388,10 @@ def trade_check(current_price, entry_price, window, in_pos, std_n=2, atr_thresho
     else:
         if current_price <= neg_std:
             return 1
-
     return 0
 
-def KNN(data):
-    # Features (exclude timestamp and cluster)
-    X = data.drop(columns=["timestamp", "cluster", "target" , "avg_close", "pos_std" ,"neg_std", "atr"])
-    y = data["cluster"]
 
-    # Train KNN model
-    knn = KNeighborsClassifier(n_neighbors=5)
-    knn.fit(X, y)
-
-    joblib.dump(knn, "trained_models/knn_model.joblib")
-
-
-def predict(window, window_length, cluster_centers, distance_threshold):
+def predict(window, cluster_centers, max_distances, sim_threshold):
     prediction = -1
 
     # === Avg Delta ===
@@ -530,246 +439,405 @@ def predict(window, window_length, cluster_centers, distance_threshold):
     })
 
     # Find the closest cluster center using Euclidean distance
-    min_dist = np.inf  # Initialize with a large value
+    
     prediction = -1
+    min_dist = np.inf
+
     for cluster in cluster_centers.index:
         
-        center_row = cluster_centers.loc[cluster, ["delta", "avg_ema10_slope", "atr_spread", 
+        center_row = cluster_centers.loc[int(cluster), ["delta", "avg_ema10_slope", "atr_spread", 
                                            "candle_ratio", "peak_count", "trough_count"]]
-        dist = np.linalg.norm(summerized.values.flatten() - center_row.values)
+        
+        distance = np.linalg.norm(summerized.values.flatten() - center_row.values)
 
-        if dist < distance_threshold and dist < min_dist:  # Check if within threshold
-            prediction = cluster  # Assign the cluster label
-            min_dist = dist
+        if distance < min_dist:
+            prediction = int(cluster)
+            min_dist = distance
 
+    similarity = 1 - (min_dist / max_distances[prediction])
 
-    return prediction
+    if similarity >= sim_threshold:
+        return prediction
+    return -1
+
+def rolling_averages(df, processed, window_length, std_n=2, atr_period=10, atr_avg=30):
+    # Rolling mean & std for close
+
+    df["mean"] = df["close"].rolling(window_length).mean()
+    df["roll_std"] = df["close"].rolling(window_length).std(ddof=1)  # sample std
     
+    # Precompute pos/neg thresholds
+    df["pos_std"] = df["mean"] + std_n * df["roll_std"]
+    df["neg_std"] = df["mean"] - std_n * df["roll_std"]
 
-def backtest(predicted, window_length):
-    # performance
-    capital = 10000.000  # Starting capital
-    quantity = 0  # Number of shares held
-    wins = 0  # Number of winning trades
-    total_trades = 0  # Total number of trades
-    
-    # Drawdown tracking
-    peak_capital = capital  # Track the highest capital reached
-    max_drawdown = 0.0  # Maximum drawdown percentage
-    capital_history = []  # Track capital over time
-
-    df = predicted.copy()  # Use the predicted DataFrame
-    df = df.reset_index(drop=True)
-    # Initialize signals column
-    df["signals"] = 0  # Initialize with zeros
-    
-    # Trading variables
-    in_pos = False
-    entry_price = 0.0
-    
-    print(f"Starting execution with {len(df)} rows")
-    print(f"DataFrame columns: {df.columns.tolist()}")
-    
-    for i in tqdm(range(window_length, len(df))):  # Include last row
-
-        # Extract window
+    df["avg_atr"] = np.nan  # Initialize avg_atr column
+    for i in tqdm(range(window_length, len(df))):
         window = df.iloc[i-window_length:i]
 
-        prediction = df.iloc[i]['prediction']
+        atr = avg_atr(window)
+        df.at[i, "avg_atr"] = atr
 
-        # Use consistent dataframe
-        current_price = df.iloc[i]['open']
-        
-        # Calculate current portfolio value (capital + position value)
+    
+    processed["pos_std"] = df["pos_std"]
+    processed["neg_std"] = df["neg_std"]
+    processed["mean"] = df["mean"]
+    processed["avg_atr"] = df["avg_atr"]
+
+
+    df.to_csv("output/historic_clustered_w_avg.csv", index=False)
+    processed.to_csv("output/processed_output_TQQQ_w_avg.csv", index=False)
+
+    return df
+    
+
+def backtest(predicted, window_length, sl, tp, std_n=2):
+
+    df = predicted.reset_index(drop=True).copy()
+
+    capital = 10000.0
+    quantity = 0
+    wins = 0
+    total_trades = 0
+    
+    peak_capital = capital
+    max_drawdown = 0.0
+
+    df = predicted.reset_index(drop=True).copy()
+    n = len(df)
+
+    # Extract numpy arrays for speed
+    opens = df["open"].to_numpy()
+    preds = df["prediction"].to_numpy()
+
+    signals = np.zeros(n, dtype=np.int8)  # instead of df.loc per loop
+    capital_history = np.empty(n, dtype=np.float64)
+
+    in_pos = False
+    entry_price = 0.0
+
+    print(df.columns)
+
+    for i in tqdm(range(window_length, n)):
+        current_price = opens[i]
+        prediction = preds[i]
+
+        # portfolio value
         if in_pos:
             current_portfolio_value = capital + (quantity * current_price)
         else:
             current_portfolio_value = capital
-        
-        # Update peak and calculate drawdown
+
+        # update drawdown
         if current_portfolio_value > peak_capital:
             peak_capital = current_portfolio_value
-        
-        current_drawdown = ((peak_capital - current_portfolio_value) / peak_capital) * 100
-        if current_drawdown > max_drawdown:
-            max_drawdown = current_drawdown
-        
-        # Store capital history for analysis
-        capital_history.append(current_portfolio_value)
-        
-        # Get trade signal
-        trade = trade_check(
-            current_price=current_price, 
-            entry_price=entry_price,  
-            window=window,
-            in_pos=in_pos, 
-            std_n=2,
-            atr_threshold_sl=1.5,
-            atr_threshold_tp=2
-        )
+        dd = ((peak_capital - current_portfolio_value) / peak_capital) * 100
+        if dd > max_drawdown:
+            max_drawdown = dd
 
-        
+        capital_history[i] = current_portfolio_value
 
-    
-        # Entry logic
-        if in_pos == False:
-            if trade == 1 and prediction != 2 and prediction != -1:
-                # Enter
+        # trade decision
+        trade = trade_check(i, current_price, entry_price, in_pos, df, tp, sl, std_n)
+        
+        # Entry
+        if not in_pos:
+            if trade == 1 and (prediction == 0 or prediction == 1):
                 in_pos = True
                 entry_price = current_price
                 quantity = capital // current_price
                 capital -= quantity * current_price
                 total_trades += 1
-                df.loc[i, "signals"] = 1
-
-        else:  # already in position
-            if (trade == -1 and prediction != 0) or prediction == 2:  # allow forced exit on down trend
-                # Exit
+                signals[i] = 1
+        else:
+            if trade == -1 and prediction != 0:
                 capital += quantity * current_price
                 if current_price > entry_price:
                     wins += 1
                 quantity = 0
                 in_pos = False
                 entry_price = 0
-                df.loc[i, "signals"] = -1
-    
-    # Final portfolio value calculation
-    final_price = df.iloc[-1]['open'] if in_pos else 0
-    final_portfolio_value = capital + (quantity * final_price if in_pos else 0)
-    
-    # Check results before saving
-    print(f"DataFrame shape before saving: {df.shape}")
+                signals[i] = -1
 
-    # Performance metrics
+    # final value
+    final_price = opens[-1] if in_pos else 0
+    final_portfolio_value = capital + (quantity * final_price if in_pos else 0)
+
+    # metrics
     total_return = ((final_portfolio_value - 10000.0) / 10000.0) * 100
     winrate = (wins / total_trades * 100) if total_trades > 0 else 0
-    
-    print(f"\n=== PERFORMANCE METRICS ===")
-    print(f"Starting capital: $10,000.00")
-    print(f"Final portfolio value: ${final_portfolio_value:.2f}")
-    print(f"Total return: {total_return:.2f}%")
-    print(f"Total trades: {total_trades}")
-    print(f"Win rate: {winrate:.2f}%")
-    print(f"Maximum drawdown: {max_drawdown:.2f}%")
-    
-    # Save to CSV
-    df.to_csv("output/historic_predicted_with_signals_TQQQ.csv", index=False)
-    print("Saved to CSV")
-    
+
+    df["signals"] = signals
+
     return {
-        'df': df,
-        'final_capital': final_portfolio_value,
-        'total_return': total_return,
-        'max_drawdown': max_drawdown,
-        'winrate': winrate,
-        'total_trades': total_trades,
-        'capital_history': capital_history
+        "df": df,
+        "final_capital": final_portfolio_value,
+        "total_return": total_return,
+        "max_drawdown": max_drawdown,
+        "winrate": winrate,
+        "total_trades": total_trades,
+        "capital_history": capital_history
     }
+
+def findLargestDist(df, cluster_centers, k):
+
+    out = np.zeros(k)
+    print(cluster_centers.index)
+    for c in cluster_centers.index:
+        cluster = df[df['cluster'] == int(c)]
+        if cluster.empty:
+            continue
+
+        cluster.reset_index(drop=True, inplace=True)
+        center_row = cluster_centers.loc[int(c), ["delta", "avg_ema10_slope", "atr_spread", 
+                                           "candle_ratio", "peak_count", "trough_count"]]
+        max_dist = 0
+        for i in tqdm(range(len(cluster))):
+            data = cluster.iloc[i][["delta", "avg_ema10_slope", "atr_spread", 
+                                           "candle_ratio", "peak_count", "trough_count"]]
             
-if __name__ == "__main__":
-    # === RAW DATA RETRIEVAL ===
+            dist = np.linalg.norm(data.values.flatten() - center_row.values)
+
+            if dist > max_dist:
+                max_dist = dist
+            # Calculate distance
+        out[int(c)] = max_dist
+    return out
+
+
+def optimise(df):
+    """
+    We are optimising the parameters for the backtest function. Parameters include:
+    - tp
+    - sl 
+    - std_n
+    - similarity threshold
     
-    #startdate=datetime(2018, 1, 1, 13, 30, 0)
-    #endDate=datetime(2025, 7, 30, 20, 30, 0)
-    #get_historical_data(API_KEY, SECRET, "TQQQ", startDate=startdate, endDate=endDate, t=1)
+    """
+    # TP & SL values: 0.2 → 5.0, step 0.05
+    tp_values = np.arange(0.5, 3.0 + 0.001, 0.5).round(2).tolist()
+    sl_values = np.arange(0.5, 3.0 + 0.001, 0.5).round(2).tolist()
 
-    # === DATA PROCESSING ===
-    #df = pd.read_csv("historic/TQQQ_historic_data_1min.csv")
-    
-    #print("Starting data processing...")
-    #process(df, 'TQQQ')
-    #print("Data processed!")
+    # std_n values: 0.1 → 5.0, step 0.1
+    std_n_values = np.arange(1, 3.0 + 0.001, 0.5).round(2).tolist()
 
-    # === CLUSTERING ===
-    #print("Clustering...")
-    #df = pd.read_csv("processed/processed_output_TQQQ.csv")
-    #clear_bad(df)
+    # sim_thresholds: 0.5 → 0.98, step 0.02
+    sim_thresholds = np.arange(0.6, 0.9 + 0.001, 0.1).round(2).tolist()
 
-    # Split df into training and testing sets (first 80% for training)
-    #split_idx = int(len(df) * 0.8)
+    historic = pd.read_csv("historic/TQQQ_historic_data_1min.csv")
 
-    #train_df = df.iloc[:split_idx].reset_index(drop=True)
-    #test_df = df.iloc[split_idx:].reset_index(drop=True)
+    historic["timestamp"] = pd.to_datetime(historic["timestamp"], utc=True)
 
-    #features_to_scale = ['delta', 'avg_ema10_slope', 'candle_ratio', 'peak_count', 'trough_count']
-    #features_to_pass = ['atr_spread']
-
-    #elbow_method(train_df, features_to_scale, features_to_pass)
-
-    #test_df.to_csv("processed/test_output_TQQQ.csv", index=False)
-    #train_df.to_csv("processed/trained_output_TQQQ.csv", index=False)
-
-    #assign_clusters(pd.read_csv("processed/processed_output_TQQQ.csv"), cluster(train_df, features_to_scale, features_to_pass))
-    #print("Clustering Successful!")
-
-
-    #progress = tqdm(total=len(steps))
-
-    df = pd.read_csv("output/clustering_output_TQQQ.csv")
-    #progress.update(1)
-    #retrieve_clusters(df, 'output', 3)
-
-    # === Cluster centers ===
-    #print("Retrieving cluster centers")
+    max_dists = np.load("output/max_distances.npy")
     cluster_summary = df.drop(columns=['timestamp']).groupby('cluster').mean()
-    print("Cluster centers:")
-    print(cluster_summary)
-    #progress.update(1)
 
-    # === PCA analysis ===
-    #print("Starting PCA analysis")
-    #X = df[['delta','avg_ema10_slope','atr_spread','candle_ratio','peak_count','trough_count']]
-    #pca = PCA(n_components=2)
-    #components = pca.fit_transform(X)
-    #df['pca1'], df['pca2'] = components[:, 0], components[:, 1]
-    #progress.update(1)
+    startdate = datetime(2025, 6, 15, 13, 30, 0, tzinfo=pytz.UTC)
+    enddate = datetime(2025, 6, 30, 20, 30, 0, tzinfo=pytz.UTC)
 
-    #sns.scatterplot(data=df, x='pca1', y='pca2', hue='cluster', palette='Set1')
-    #plt.title('PCA of Clustered Data')
-    #plt.savefig("output/pca_clusters.png", dpi=300, bbox_inches='tight')  # Save the figure
-    #progress.update(1)
+    historic = historic[
+        (historic["timestamp"] >= startdate) &
+        (historic["timestamp"] <= enddate)
+    ]
 
+    total_combinations = len(tp_values) * len(sl_values) * len(std_n_values)
+    print(f"Total combinations to test: {total_combinations} for {len(sim_thresholds)} similarity thresholds")
+    
+    done = 0
 
-    predict_ = False
-    if predict_:
-        historic = pd.read_csv("historic/TQQQ_historic_data_1min.csv")
+    results = []
 
-        historic["timestamp"] = pd.to_datetime(historic["timestamp"], utc=True)
+    for sim_threshold in sim_thresholds:
+        
+        historic['prediction'] = -1
+        pred_col = historic.columns.get_loc('prediction')
 
-        startdate = datetime(2024, 5, 1, 13, 30, 0, tzinfo=pytz.UTC)
-        enddate = datetime(2025, 6, 30, 20, 30, 0, tzinfo=pytz.UTC)
+        for i in tqdm(range(30, len(historic))):
+            window = historic.iloc[i-30:i]
+            prediction =  predict(window, cluster_summary, max_distances=max_dists, sim_threshold=sim_threshold)
+            historic.iloc[i, pred_col] = prediction
 
+        for tp in tp_values:
+            for sl in sl_values:
+                for std_n in std_n_values:
+                    bt_result = backtest(historic, window_length=30, sl=sl,
+                                         tp=tp, std_n=std_n)
+                    results.append({
+                        "tp": tp,
+                        "sl": sl,
+                        "std_n": std_n,
+                        "sim_threshold": sim_threshold,
+                        "total_return": bt_result["total_return"],
+                        "max_drawdown": bt_result["max_drawdown"],
+                        "final_capital": bt_result["final_capital"],
+                        "winrate": bt_result["winrate"],
+                        "total_trades": bt_result["total_trades"]
+                    })
 
-        historic = historic[
+                    done += 1
+                    print(f"Completed {done}/{total_combinations}")
+                     
+    results_df = pd.DataFrame(results)
+    results_df.to_csv("output/optimisation_results.csv", index=False)
+    print("Saved results to output/optimisation_results.csv")
+    
+def precompute_predictions(historic, cluster_centers, max_distances, startdate, enddate, window_size, sim_threshold=0.8):
+    historic["timestamp"] = pd.to_datetime(historic["timestamp"], utc=True)
+
+    historic = historic[
             (historic["timestamp"] >= startdate) &
             (historic["timestamp"] <= enddate)
         ]
+    
+    historic.set_index("timestamp", inplace=True)
 
-        historic.set_index("timestamp", inplace=True)
+    # == PREDICTION ==
+    print("Starting prediction...")
+    historic['prediction'] = -1
+    pred_col = historic.columns.get_loc('prediction')
 
-        # === PREDICTION ===
-        print("Starting prediction...")
+    print(len(historic))
 
-        historic['prediction'] = -1
-        pred_col = historic.columns.get_loc('prediction')
-        for i in tqdm(range(30, len(historic))):
-            window = historic.iloc[i-30:i]
-            prediction =  predict(window, 30, cluster_summary, 1.5)
-            historic.iloc[i, pred_col] = prediction
-        historic.to_csv("output/test_predicted_TQQQ.csv", index=True)
+    for i in tqdm(range(window_size, len(historic))):
+        window = historic.iloc[i-window_size:i]
+        prediction = predict(window, cluster_centers, max_distances=max_distances, sim_threshold=sim_threshold)
+        historic.iloc[i, pred_col] = prediction
+    historic.to_csv("output/historic_clustered_w_avg_predicted_TQQQ.csv", index=True)
 
-        print(f'number of predictions: {len(historic)}')
-        print(f'number of predictions with -1: {len(historic[historic["prediction"] == -1])}')
-        print(f'number of predictions with 0: {len(historic[historic["prediction"] == 0])}')
-        print(f'number of predictions with 1: {len(historic[historic["prediction"] == 1])}')
-        print(f'number of predictions with 2: {len(historic[historic["prediction"] == 2])}')
+    print(f'number of predictions: {len(historic)}')
+    print(f'number of predictions with -1: {len(historic[historic["prediction"] == -1])}')
+    print(f'number of predictions with 0: {len(historic[historic["prediction"] == 0])}')
+    print(f'number of predictions with 1: {len(historic[historic["prediction"] == 1])}')
+    print(f'number of predictions with 2: {len(historic[historic["prediction"] == 2])}')
 
 
-    predicted = pd.read_csv("output/test_predicted_TQQQ.csv")
-    backtest(predicted, window_length=30)
-    plot = pd.read_csv("output\historic_predicted_with_signals_TQQQ.csv")
-    plot_candlestick(plot)
-    #print("Done!")
+    
+
+    
+def compute_cluster_centers_chunked(df, chunk_size=10000):
+    """Compute cluster centers with chunked processing for very large datasets"""
+    
+    df_no_timestamp = df.drop(columns=['timestamp'])
+    unique_clusters = df_no_timestamp['cluster'].unique()
+    
+    cluster_centers = {}
+
+    print("Computing cluster centers...")
+    
+    for cluster_id in tqdm(unique_clusters, desc="Processing clusters"):
+        cluster_data = df_no_timestamp[df_no_timestamp['cluster'] == cluster_id]
+        cluster_centers[cluster_id] = cluster_data.drop(columns=['cluster']).mean()
+    
+    return pd.DataFrame(cluster_centers).T
+                    
+def delete_garbage_cluster(clustered, original_processed, cluster_id):
+    """
+    Deletes a cluster from the processed DataFrame.
+    This is useful if a cluster is found to be garbage or not useful.
+    """
+    # Find all timestamps in clustered that belong to that cluster
+    timestamps_to_remove = clustered[clustered['cluster'] == cluster_id]['timestamp']
+
+    # Filter original_processed by removing those timestamps
+    df_filtered = original_processed[~original_processed['timestamp'].isin(timestamps_to_remove)].reset_index(drop=True)
+    df_filtered.to_csv(f"processed/processed_output_TQQQ.csv", index=False)
+
+            
+if __name__ == "__main__":
+    # == RAW DATA RETRIEVAL ==
+    #startdate = datetime(2025, 6, 1, 13, 30, 0, tzinfo=pytz.UTC)
+    #enddate = datetime(2025, 6, 30, 20, 30, 0, tzinfo=pytz.UTC)
+
+    #historic = get_historical_data(API_KEY, SECRET, "TQQQ", startDate=startdate,endDate=enddate, daily=False, t=1)
+    # == PROCESSING RAW DATA ==
+    historic = pd.read_csv("historic/TQQQ_historic_data_1min.csv")
+    #processed_historic = process(historic, "TQQQ")
+    processed_historic = pd.read_csv("processed/processed_output_TQQQ.csv")
+    
+
+    # == CLUSTERING ==
+    print("Clustering...")
+    
+    #clear_bad(processed_historic)
+
+    split_index = int(len(processed_historic) * 0.8)
+    train_df = processed_historic[:split_index]
+    test_df = processed_historic[split_index:]
+
+    features_to_scale = ["delta", "avg_ema10_slope", "atr_spread", "candle_ratio", "peak_count", "trough_count"]
+    features_to_pass = ["timestamp"]
+
+    #elbow_method(train_df, features_to_scale, features_to_pass)
+
+    clustered_df = cluster(train_df, features_to_scale, features_to_pass)
+    processed_clustered = pd.read_csv("output/clustering_output_TQQQ.csv")
+
+
+    #for c in range(3):
+        #count = (processed_clustered['cluster'] == c).sum()
+        #print(f"Cluster {c} row count: {count}")
+
+    #delete_garbage_cluster(processed_clustered, processed_historic, 2)
+
+    historic_clustered = assign_clusters(historic, processed_clustered)
+    historic_clustered = pd.read_csv("output/historic_clustering_output_TQQQ.csv")
+    
+
+
+    # == CLUSTER CENTERS ==
+    cluster_centers = processed_clustered.drop(columns=['timestamp']).groupby('cluster').mean()
+    #print(cluster_centers)
+
+    # == AVERAGES ==
+    window_length = 30
+    std_n = 2
+    print("Calculating rolling averages...")
+    print("last timestamp:", historic_clustered["timestamp"].iloc[-1])
+    #rolling_averages(df=historic_clustered, processed=processed_clustered, window_length=window_length, std_n=std_n, 
+                     #atr_period=10, atr_avg=30)
+    historic_clustered_w_avg = pd.read_csv("output/historic_clustered_w_avg.csv")
+    processed_historic_w_avg = pd.read_csv("output/processed_output_TQQQ_w_avg.csv")
+
+    print("Rolling averages calculated and saved to output/historic_clustered_w_avg.csv")
+
+    
+    # == Prediction ==
+
+    #max_dists = findLargestDist(processed_historic_w_avg, cluster_centers, k=3)
+    max_dists = np.load("output/max_distances.npy")
+    print("Max distances for each cluster:", max_dists)
+
+    #precompute_predictions(historic_clustered_w_avg, cluster_centers,
+                           #max_distances=max_dists,
+                           #startdate=datetime(2025, 6, 1, 13, 30, 0, tzinfo=pytz.UTC),
+                           #enddate=datetime(2025, 6, 30, 20, 30, 0, tzinfo=pytz.UTC),
+                           #window_size=window_length, sim_threshold=0.8)
+    predicted = pd.read_csv("output/historic_clustered_w_avg_predicted_TQQQ.csv")
+
+    # == BACKTESTING ==
+    backtest_result = backtest(predicted, window_length=window_length, sl=1, tp=1, std_n=0.1)
+    backtest_result["df"].to_csv("output/backtest_result_TQQQ.csv", index=False)
+
+    print("Backtest Results:")
+    print(f"Final Capital: {backtest_result['final_capital']:.2f}")
+    print(f"Total Return: {backtest_result['total_return']:.2f}%")
+    print(f"Max Drawdown: {backtest_result['max_drawdown']:.2f}%")
+    print(f"Winrate: {backtest_result['winrate']:.2f}%")
+    print(f"Total Trades: {backtest_result['total_trades']}")
+
+    backtest_result = pd.read_csv("output/backtest_result_TQQQ.csv")
+
+    plot_candlestick(backtest_result)
+    
+    
+
+
+
+
+
+
+
+
+    
+
 
 
 
