@@ -378,6 +378,8 @@ def trade_check(i, current_price, entry_price, in_pos, df, atr_threshold_tp=1.5,
     neg_std = mean - std_n * std
     atr = df.at[i, "avg_atr"]
 
+    neg_std_dynamic = neg_std / (1 + diff/atr)  # simple inverse relationship
+
     if pd.isna(pos_std) or pd.isna(atr):
         return 0  # skip until rolling windows are valid
     
@@ -388,7 +390,7 @@ def trade_check(i, current_price, entry_price, in_pos, df, atr_threshold_tp=1.5,
             return -1
             
     else:
-        if current_price <= neg_std and diff > 0:
+        if current_price <= neg_std_dynamic and diff > 0:
             return 1
     return 0
 
@@ -754,7 +756,21 @@ def delete_garbage_cluster(clustered, original_processed, cluster_id):
     df_filtered = original_processed[~original_processed['timestamp'].isin(timestamps_to_remove)].reset_index(drop=True)
     df_filtered.to_csv(f"processed/processed_output_TQQQ.csv", index=False)
 
-            
+def optimal_front_plot(optimised_values, baseline_return):
+    # Filter values above baseline return
+    optimised_values = optimised_values[optimised_values["return"] >= baseline_return]
+
+    x = optimised_values["drawdown"]
+    y = optimised_values["return"]
+
+    # Simple scatter plot
+    plt.scatter(x, y, s=20, c='blue', marker='o', alpha=1.0)
+    plt.xlabel('Drawdown')
+    plt.ylabel('Return')
+    plt.title('Optimised Values Scatter Plot')
+    plt.grid(True)
+    plt.show()
+  
 if __name__ == "__main__":
     # == RAW DATA RETRIEVAL ==
     #startdate = datetime(2025, 6, 1, 13, 30, 0, tzinfo=pytz.UTC)
@@ -834,7 +850,10 @@ if __name__ == "__main__":
     #backtest_result = pd.read_csv("output/backtest_result_TQQQ.csv")
 
     #plot_candlestick(backtest_result)
-    optimise()
+    #optimise()
+    optimal_vals = pd.read_csv("output/optimisation_results.csv")
+    optimal_front_plot(optimal_vals, 55)
+    print("done")
     
     
 
