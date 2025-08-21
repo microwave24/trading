@@ -91,11 +91,11 @@ def plot_candlestick(df):
     # Only include non-empty addplots
     apds = []
     for series, kwargs in [
-        (buy_marker, dict(type='scatter', markersize=50, marker='^', color='lime', panel=0)),
-        (sell_marker, dict(type='scatter', markersize=50, marker='v', color='red', panel=0)),
+        (buy_marker, dict(type='scatter', markersize=100, marker='^', color='lime', panel=0)),
+        (sell_marker, dict(type='scatter', markersize=100, marker='v', color='red', panel=0)),
         (marker_0, dict(type='scatter', markersize=5, marker='o', color="#15FF00")),
-        (marker_1, dict(type='scatter', markersize=5, marker='o', color="#EB0E0E")),
-        (marker_2, dict(type='scatter', markersize=5, marker='o', color="#012391"))
+        (marker_1, dict(type='scatter', markersize=5, marker='o', color="#0E9AEB")),
+        (marker_2, dict(type='scatter', markersize=5, marker='o', color="#FF0000"))
         
     ]:
         if series.notna().any():  # only add if there's at least one valid point
@@ -362,8 +362,8 @@ def trade_check(i, current_price, entry_price, tp_price, sl_price, in_pos, df, p
                 atr_threshold_tp=1, atr_threshold_sl=1, std_n=2):
 
     bullish_c = 0
-    kangaroo_c = 2
-    bear_c = 1
+    kangaroo_c = 1
+    bear_c = 2
 
 
     none = -1
@@ -621,7 +621,7 @@ def findLargestDist(df, cluster_centers, k):
     return out
 
 
-def optimise(symbol):
+def optimise(symbol, window_length):
     """
     We are optimising the parameters for the backtest function. Parameters include:
     - tp
@@ -631,20 +631,20 @@ def optimise(symbol):
     
     """
     # TP & SL values: 0.2 → 5.0, step 0.05
-    tp_values = np.arange(1, 20 + 0.001, 1).round(2).tolist()
-    sl_values = np.arange(1, 20 + 0.001, 1).round(2).tolist()
+    tp_values = np.arange(0.5, 8 + 0.001, 0.5).round(2).tolist()
+    sl_values = np.arange(0.5, 8 + 0.001, 0.5).round(2).tolist()
 
     # std_n values: 0.1 → 5.0, step 0.1
-    std_n_values = np.arange(1, 20 + 0.001, 1).round(2).tolist()
+    std_n_values = np.arange(1, 10 + 0.001, 1).round(2).tolist()
 
     # sim_thresholds: 0.5 → 0.98, step 0.02
-    sim_thresholds = np.arange(0, 0.75 + 0.001, 0.5).round(2).tolist()
+    sim_thresholds = np.arange(0.1, 0.8 + 0.001, 0.1).round(2).tolist()
     processed_clustered = pd.read_csv(f"output/clustering_output_{symbol}.csv")
 
 
     cluster_centers = processed_clustered.drop(columns=['timestamp']).groupby('cluster').mean()
 
-    #rolling_averages(df=historic_clustered, processed=processed_clustered, window_length=30)
+    #rolling_averages(df=historic_clustered, processed=processed_clustered, window_length=window_length)
     historic_clustered_w_avg = pd.read_csv("output/historic_clustered_w_avg.csv")
 
     max_dists = np.load("output/max_distances.npy")
@@ -668,7 +668,7 @@ def optimise(symbol):
                            max_distances=max_dists,
                            startdate=startdate,
                            enddate=enddate,
-                           window_size=15, sim_threshold=sim_threshold, symbol=symbol)
+                           window_size=window_length, sim_threshold=sim_threshold, symbol=symbol)
         predicted = pd.read_csv(f"output/historic_clustered_w_avg_predicted_{symbol}.csv")
 
         predicted["timestamp"] = pd.to_datetime(predicted["timestamp"], utc=True)
@@ -680,7 +680,7 @@ def optimise(symbol):
         for sl in sl_values:
             for tp in tp_values:
                 for stds in std_n_values:
-                    backtest_result = backtest(predicted, window_length=15, sl=sl, tp=tp, std_n=stds)
+                    backtest_result = backtest(predicted, window_length=window_length, sl=sl, tp=tp, std_n=stds)
                     if backtest_result == -1:
                         continue
                     results.append({
@@ -759,101 +759,128 @@ def optimal_front_plot(optimised_values, baseline_return):
     plt.show()
   
 if __name__ == "__main__":
-    # == RAW DATA RETRIEVAL ==
-    symbol ='URNM'
-    startdate = datetime(2021, 1, 1, 13, 30, 0, tzinfo=pytz.UTC)
-    enddate = datetime(2025, 7, 30, 20, 30, 0, tzinfo=pytz.UTC)
-
-    #historic = get_historical_data(API_KEY, SECRET, f"{symbol}", startDate=startdate,endDate=enddate, t_type="d", t=1)
-    # == PROCESSING RAW DATA ==
-    historic = pd.read_csv(f"historic/{symbol}_historic_data_1min.csv")
-    #processed_historic = process(historic, f"{symbol}", 15)
+    optimising = 2
+    window_length = 10
+    symbol ='PCG'
+    if optimising == 1:
+        optimise(symbol=symbol,window_length=window_length)
+        optimal_vals = pd.read_csv("output/optimisation_results.csv")
+        optimal_front_plot(optimal_vals, -99)
+        print("done")
+    elif optimising == 0:
+        # == RAW DATA RETRIEVAL ==
     
+        startdate = datetime(2021, 1, 1, 13, 30, 0, tzinfo=pytz.UTC)
+        enddate = datetime(2025, 7, 30, 20, 30, 0, tzinfo=pytz.UTC)
 
-    processed_historic = pd.read_csv(f"processed/processed_output_{symbol}.csv")
-    #clear_bad(processed_historic)
-    
+        historic = get_historical_data(API_KEY, SECRET, f"{symbol}", startDate=startdate,endDate=enddate, t_type="h", t=2)
+        # == PROCESSING RAW DATA ==
+        
+        historic = pd.read_csv(f"historic/{symbol}_historic_data_1min.csv")
+        processed_historic = process(historic, f"{symbol}", window_length)
+        
 
-    # == CLUSTERING == #optimise
-    print("Clustering...")
-    
-    split_index = int(len(processed_historic) * 0.8)
-    train_df = processed_historic[:split_index]
-    test_df = processed_historic[split_index:]
+        processed_historic = pd.read_csv(f"processed/processed_output_{symbol}.csv")
+        clear_bad(processed_historic)
+        
 
-    features_to_scale = ["delta", "avg_ema10_slope", "atr_spread", "candle_ratio", "peak_count", "trough_count"]
-    features_to_pass = ["timestamp"]
+        # == CLUSTERING == #optimise
+        print("Clustering...")
+        
+        split_index = int(len(processed_historic) * 0.8)
+        train_df = processed_historic[:split_index]
+        test_df = processed_historic[split_index:]
 
-    
-    #elbow_method(train_df, features_to_scale, features_to_pass)
-    
-    #clustered_df = cluster(train_df, features_to_scale, features_to_pass, k=3, symbol=symbol)
-    processed_clustered = pd.read_csv(f"output/clustering_output_{symbol}.csv")
+        features_to_scale = ["delta", "avg_ema10_slope", "atr_spread", "candle_ratio", "peak_count", "trough_count"]
+        features_to_pass = ["timestamp"]
 
-    ##delete_garbage_cluster(processed_clustered, processed_historic, 2, symbol=symbol)
+        
+        elbow_method(train_df, features_to_scale, features_to_pass)
+        
+        clustered_df = cluster(train_df, features_to_scale, features_to_pass, k=3, symbol=symbol)
+        processed_clustered = pd.read_csv(f"output/clustering_output_{symbol}.csv")
 
-    #historic_clustered = assign_clusters(historic, processed_clustered, symbol=symbol)
+        ##delete_garbage_cluster(processed_clustered, processed_historic, 2, symbol=symbol)
+
+        historic_clustered = assign_clusters(historic, processed_clustered, symbol=symbol)
+        historic_clustered = pd.read_csv(f"output/historic_clustering_output_{symbol}.csv")
+        
+
+
+        # == CLUSTER CENTERS ==
+        cluster_centers = processed_clustered.drop(columns=['timestamp']).groupby('cluster').mean()
+        print(cluster_centers)
+
+
+        ## === 4 clusters
+        # Cluster 0 = Consolidation
+        # CLuster 1 = Bullish
+        # Cluster 2 = Heavy Bearish
+        # Cluster 3 = Bearish
+        ## === 3 clusters
+        # 0 = bull
+        # 1 = consol
+        # 2 = bear
+
+        # == AVERAGES ==
+        std_n = 2
+        print("Calculating rolling averages...")
+        rolling_averages(df=historic_clustered, processed=processed_clustered, window_length=window_length, symbol=symbol)
+        historic_clustered_w_avg = pd.read_csv("output/historic_clustered_w_avg.csv")
+        processed_historic_w_avg = pd.read_csv(f"output/processed_output_{symbol}_w_avg.csv")
+
+        print("Rolling averages calculated and saved to output/historic_clustered_w_avg.csv")
+
+        # == Prediction ==
+
+        max_dists = findLargestDist(processed_historic_w_avg, cluster_centers, k=4)
+        np.save("output/max_distances.npy", max_dists)
+        max_dists = np.load("output/max_distances.npy")
+        print("Max distances for each cluster:", max_dists)
+
+        precompute_predictions(historic_clustered_w_avg, cluster_centers,
+                            max_distances=max_dists,
+                            startdate=datetime(2024, 7, 1, 13, 30, 0, tzinfo=pytz.UTC),
+                            enddate=datetime(2025, 7, 30, 20, 30, 0, tzinfo=pytz.UTC),
+                            window_size=window_length, sim_threshold=0.0, symbol=symbol)
+        predicted = pd.read_csv(f"output/historic_clustered_w_avg_predicted_{symbol}.csv")\
+
     historic_clustered = pd.read_csv(f"output/historic_clustering_output_{symbol}.csv")
-    
-
-
-    # == CLUSTER CENTERS ==
-    cluster_centers = processed_clustered.drop(columns=['timestamp']).groupby('cluster').mean()
-    print(cluster_centers)
-
-
-    ## === 4 clusters
-    # Cluster 0 = Consolidation
-    # CLuster 1 = Bullish
-    # Cluster 2 = Heavy Bearish
-    # Cluster 3 = Bearish
-    ## === 3 clusters
-    # 0 = bull
-    # 1 = consol
-    # 2 = bear
-
-    # == AVERAGES ==
-    window_length = 15
-    std_n = 2
-    print("Calculating rolling averages...")
-    rolling_averages(df=historic_clustered, processed=processed_clustered, window_length=window_length, symbol=symbol)
+    processed_clustered = pd.read_csv(f"output/clustering_output_{symbol}.csv")
+    cluster_centers = processed_clustered.drop(columns=['timestamp']).groupby('cluster').mean()    
     historic_clustered_w_avg = pd.read_csv("output/historic_clustered_w_avg.csv")
     processed_historic_w_avg = pd.read_csv(f"output/processed_output_{symbol}_w_avg.csv")
-
-    print("Rolling averages calculated and saved to output/historic_clustered_w_avg.csv")
-
-    # == Prediction ==
-
-    max_dists = findLargestDist(processed_historic_w_avg, cluster_centers, k=4)
-    np.save("output/max_distances.npy", max_dists)
     max_dists = np.load("output/max_distances.npy")
-    print("Max distances for each cluster:", max_dists)
-
-    precompute_predictions(historic_clustered_w_avg, cluster_centers,
-                           max_distances=max_dists,
-                           startdate=datetime(2024, 7, 1, 13, 30, 0, tzinfo=pytz.UTC),
-                           enddate=datetime(2025, 7, 30, 20, 30, 0, tzinfo=pytz.UTC),
-                           window_size=15, sim_threshold=0.0, symbol=symbol)
-    predicted = pd.read_csv(f"output/historic_clustered_w_avg_predicted_{symbol}.csv")
-
-    # == BACKTESTING ==
-    #backtest_result = backtest(predicted, window_length=15, sl=6, tp=9, std_n=2)
-    #backtest_result["df"].to_csv(f"output/backtest_result_{symbol}.csv", index=False)
     
-    #print("Backtest Results:")
-    #print(f"Final Capital: {backtest_result['final_capital']:.2f}")
-    #print(f"Total Return: {backtest_result['total_return']:.2f}%")
-    #print(f"Max Drawdown: {backtest_result['max_drawdown']:.2f}%")
-    #print(f"Winrate: {backtest_result['winrate']:.2f}%")
-    #print(f"Total Trades: {backtest_result['total_trades']}")
+    precompute_predictions(historic_clustered_w_avg, cluster_centers,
+                            max_distances=max_dists,
+                            startdate=datetime(2024, 7, 1, 13, 30, 0, tzinfo=pytz.UTC),
+                            enddate=datetime(2025, 7, 30, 20, 30, 0, tzinfo=pytz.UTC),
+                            window_size=window_length, sim_threshold=0.1, symbol=symbol)
+    
+    
+    predicted = pd.read_csv(f"output/historic_clustered_w_avg_predicted_{symbol}.csv")
+        #== BACKTESTING ==
+    backtest_result = backtest(predicted, window_length=window_length, sl=0.5, tp=2, std_n=2)
+    backtest_result["df"].to_csv(f"output/backtest_result_{symbol}.csv", index=False)
+        
+    print("Backtest Results:")
+    print(f"Final Capital: {backtest_result['final_capital']:.2f}")
+    print(f"Total Return: {backtest_result['total_return']:.2f}%")
+    print(f"Max Drawdown: {backtest_result['max_drawdown']:.2f}%")
+    print(f"Winrate: {backtest_result['winrate']:.2f}%")
+    print(f"Total Trades: {backtest_result['total_trades']}")
 
-    #backtest_result = pd.read_csv(f"output/backtest_result_{symbol}.csv")
+    backtest_result = pd.read_csv(f"output/backtest_result_{symbol}.csv")
 
-    #plot_candlestick(backtest_result)
-    optimise(symbol=symbol)
-    optimal_vals = pd.read_csv("output/optimisation_results.csv")
-    optimal_front_plot(optimal_vals, -99)
-    print("done")
+    plot_candlestick(backtest_result)
+
+    
+
+    
+
+
+    
     
     
 
