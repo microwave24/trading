@@ -47,8 +47,8 @@ from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from databento import DBNStore
 
 # === Configuration ===
-API_KEY = ""
-SECRET = ""
+API_KEY = "PKHLDVUZSBAVJ0GWCR14"
+SECRET = "bK4CterukecekQpcg2ElddIW90MrRvggmYU36Ehg"
 # === Data Preperation and Analysis ===
 
 
@@ -94,7 +94,7 @@ def plot_candlestick(df):
         (buy_marker, dict(type='scatter', markersize=100, marker='^', color='lime', panel=0)),
         (sell_marker, dict(type='scatter', markersize=100, marker='v', color='red', panel=0)),
         (marker_0, dict(type='scatter', markersize=5, marker='o', color="#15FF00")),
-        (marker_1, dict(type='scatter', markersize=5, marker='o', color="#0E9AEB")),
+        (marker_1, dict(type='scatter', markersize=5, marker='o', color="#0E12EB")),
         (marker_2, dict(type='scatter', markersize=5, marker='o', color="#FF0000"))
         
     ]:
@@ -631,11 +631,11 @@ def optimise(symbol, window_length):
     
     """
     # TP & SL values: 0.2 → 5.0, step 0.05
-    tp_values = np.arange(0.5, 8 + 0.001, 0.5).round(2).tolist()
-    sl_values = np.arange(0.5, 8 + 0.001, 0.5).round(2).tolist()
+    tp_values = np.arange(0.5, 6 + 0.001, 0.5).round(2).tolist()
+    sl_values = np.arange(0.5, 6 + 0.001, 0.5).round(2).tolist()
 
     # std_n values: 0.1 → 5.0, step 0.1
-    std_n_values = np.arange(1, 10 + 0.001, 1).round(2).tolist()
+    std_n_values = np.arange(1, 5 + 0.001, 1).round(2).tolist()
 
     # sim_thresholds: 0.5 → 0.98, step 0.02
     sim_thresholds = np.arange(0.1, 0.8 + 0.001, 0.1).round(2).tolist()
@@ -760,7 +760,7 @@ def optimal_front_plot(optimised_values, baseline_return):
   
 if __name__ == "__main__":
     optimising = 2
-    window_length = 10
+    window_length = 20
     symbol ='PCG'
     if optimising == 1:
         optimise(symbol=symbol,window_length=window_length)
@@ -856,12 +856,12 @@ if __name__ == "__main__":
                             max_distances=max_dists,
                             startdate=datetime(2024, 7, 1, 13, 30, 0, tzinfo=pytz.UTC),
                             enddate=datetime(2025, 7, 30, 20, 30, 0, tzinfo=pytz.UTC),
-                            window_size=window_length, sim_threshold=0.1, symbol=symbol)
+                            window_size=window_length, sim_threshold=0.8, symbol=symbol)
     
     
     predicted = pd.read_csv(f"output/historic_clustered_w_avg_predicted_{symbol}.csv")
-        #== BACKTESTING ==
-    backtest_result = backtest(predicted, window_length=window_length, sl=0.5, tp=2, std_n=2)
+        #== BACKTESTING == 4.0,1.0,1.0,0.8
+    backtest_result = backtest(predicted, window_length=window_length, sl=4, tp=1, std_n=1)
     backtest_result["df"].to_csv(f"output/backtest_result_{symbol}.csv", index=False)
         
     print("Backtest Results:")
