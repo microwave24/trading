@@ -50,6 +50,8 @@ from databento import DBNStore
 API_KEY = "PKHLDVUZSBAVJ0GWCR14"
 SECRET = "bK4CterukecekQpcg2ElddIW90MrRvggmYU36Ehg"
 # === Data Preperation and Analysis ===
+market_open = pd.Timestamp(year=2025, month=1, day=1, hour=9, minute=30, tz="America/New_York").time()
+market_close = pd.Timestamp(year=2025, month=1, day=1, hour=16, minute=0, tz="America/New_York").time()
 
 
 
@@ -70,17 +72,21 @@ def plot_candlestick(df):
     marker_0 = pd.Series(np.nan, index=df.index)
     marker_1 = pd.Series(np.nan, index=df.index)
     marker_2 = pd.Series(np.nan, index=df.index)
+    marker_3 = pd.Series(np.nan, index=df.index)
 
     cluster0 = df["prediction"] == 0
     cluster1 = df["prediction"] == 1
     cluster2 = df["prediction"] == 2
+    cluster3 = df["prediction"] == 3
 
     buy_r = df["signals"] == 1
     sell_r = df["signals"] == -1
 
     marker_0[cluster0] = df['Open'][cluster0]   
     marker_1[cluster1] = df['Open'][cluster1] 
-    marker_2[cluster2] = df['Open'][cluster2]  
+    marker_2[cluster2] = df['Open'][cluster2]
+    marker_3[cluster3] = df['Open'][cluster3]  
+     
 
     buy_marker = pd.Series(np.nan, index=df.index)
     sell_marker = pd.Series(np.nan, index=df.index)
@@ -93,9 +99,11 @@ def plot_candlestick(df):
     for series, kwargs in [
         (buy_marker, dict(type='scatter', markersize=100, marker='^', color='lime', panel=0)),
         (sell_marker, dict(type='scatter', markersize=100, marker='v', color='red', panel=0)),
-        (marker_0, dict(type='scatter', markersize=5, marker='o', color="#15FF00")),
-        (marker_1, dict(type='scatter', markersize=5, marker='o', color="#0E12EB")),
-        (marker_2, dict(type='scatter', markersize=5, marker='o', color="#FF0000"))
+        (marker_0, dict(type='scatter', markersize=5, marker='o', color="#FF0000")),
+        (marker_1, dict(type='scatter', markersize=5, marker='o', color="#3AEB0E")),
+        (marker_2, dict(type='scatter', markersize=5, marker='o', color="#0400FF")),
+        (marker_3, dict(type='scatter', markersize=5, marker='o', color="#FF00AA"))
+
         
     ]:
         if series.notna().any():  # only add if there's at least one valid point
@@ -139,6 +147,12 @@ def get_historical_data(api_key, secret_key, symbol, startDate, endDate, t_type=
 
     bars = client.get_stock_bars(request) # actual data
     df = pl.DataFrame([bar.__dict__ for bar in bars[symbol]])
+
+    df = df.with_columns(
+        pl.col("timestamp")
+        .dt.replace_time_zone("UTC")       # localize to UTC
+        .dt.convert_time_zone("America/New_York")  # convert to New York
+    )
 
     print("Historical data retrieved")
     df.write_csv(f"historic/{symbol}_historic_data_1min.csv")
@@ -358,48 +372,71 @@ def retrieve_clusters(df, output_path, cluster_count=3):
 
 
 
-def trade_check(i, current_price, entry_price, tp_price, sl_price, in_pos, df, prediction,
-                atr_threshold_tp=1, atr_threshold_sl=1, std_n=2):
+def trade_check(
+    i, current_price, entry_price, tp_price, sl_price, in_pos, df, prediction,
+    atr_threshold_tp=1, atr_threshold_sl=1, std_n=2,
+    buy_signals_threshold=1, buy_signal_count=0
+):
+    trade_afterhours = True
 
-    bullish_c = 0
-    kangaroo_c = 1
+    # fix labels (example: 0=bullish, 1=kangaroo, 2=bear)
+    bullish_c = 1
+    kangaroo_c = 3
     bear_c = 2
 
-
     none = -1
-
     hyper_bear = -99
     hyper_bull = -99
 
-    std = df.at[i, "roll_std"]
+    std  = df.at[i, "roll_std"]
     mean = df.at[i, "mean"]
     diff = df.at[i, "ema_diff"]
+    atr  = df.at[i, "avg_atr"]
 
     pos_std = mean + std_n * std
     neg_std = mean - std_n * std
-    atr = df.at[i, "avg_atr"]
+    neg_std_dynamic = neg_std / (1 + diff)  # if you want dynamic version
 
-    neg_std_dynamic = neg_std / (1 + diff)
+    # (Define these if you actually want RTH-only)
+    # market_open  = time(9, 30)
+    # market_close = time(16, 0)
+
+    ts = df.at[i, "timestamp"].time()
+    if (trade_afterhours is False):  # requires market_open/close defined
+        if not (market_open <= ts <= market_close):
+            return 0, tp_price, sl_price, buy_signal_count
 
     if pd.isna(pos_std) or pd.isna(atr):
-        return 0, tp_price, sl_price
-    
-    if in_pos:
-        if current_price >= tp_price:
-            return -1, tp_price, sl_price
-        elif current_price <= sl_price:
-            return -1, tp_price, sl_price
-    else:
-        if (prediction == kangaroo_c ) and current_price <= neg_std:
-            tp_price = mean + atr * atr_threshold_tp
-            sl_price = mean - atr * atr_threshold_sl
-            return 1, tp_price, sl_price
-        if prediction == bullish_c and diff > np.inf and current_price <= neg_std + std:
-            tp_price = current_price + 2*atr * atr_threshold_tp
-            sl_price = current_price - atr * atr_threshold_sl
-            return 1, tp_price, sl_price
+        return 0, tp_price, sl_price, buy_signal_count  # <-- always return count
 
-    return 0, tp_price, sl_price
+    if in_pos:
+        # exit rules
+        if current_price >= tp_price or current_price <= sl_price:
+            # On exit, you can reset the streak if you want the next setup to rebuild
+            buy_signal_count = 0
+            return -1, tp_price, sl_price, buy_signal_count
+
+        # Hold: don’t touch the streak while in position.
+        return 0, tp_price, sl_price, buy_signal_count
+
+    # === Not in position: update the streak ===
+    if prediction == kangaroo_c:
+        buy_signal_count += 1
+    else:
+        buy_signal_count = 0
+
+    # Optionally require price condition as well:
+    ready_to_buy = (buy_signal_count >= buy_signals_threshold)
+    price_ok     = (current_price <= neg_std)  # or use neg_std_dynamic
+
+    if ready_to_buy and price_ok:
+        tp_price = mean + atr * atr_threshold_tp
+        sl_price = mean - atr * atr_threshold_sl
+        # Reset streak after taking the trade so new setups must rebuild
+        buy_signal_count = 0
+        return 1, tp_price, sl_price, buy_signal_count
+
+    return 0, tp_price, sl_price, buy_signal_count
 
 
 def predict(window, cluster_centers, max_distances, sim_threshold):
@@ -502,7 +539,7 @@ def rolling_averages(df, processed, window_length, symbol):
     return df
     
 
-def backtest(predicted, window_length, sl, tp, std_n=2):
+def backtest(predicted, window_length, sl, tp, std_n=2, buy_signal_threshold=1):
 
     df = predicted.reset_index(drop=True).copy()
     df.dropna()
@@ -530,6 +567,9 @@ def backtest(predicted, window_length, sl, tp, std_n=2):
     tp_price = np.inf
     sl_price = -np.inf
 
+    buy_signals_count = 0
+
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert("America/New_York")
     for i in range(window_length, n):
         current_price = opens[i]
         prediction = preds[i]
@@ -550,7 +590,7 @@ def backtest(predicted, window_length, sl, tp, std_n=2):
         capital_history[i] = current_portfolio_value
 
         # trade decision
-        trade, tp_price, sl_price = trade_check(i=i, current_price=current_price,entry_price=entry_price, tp_price=tp_price, sl_price=sl_price,in_pos=in_pos,df=df, prediction=prediction, std_n=std_n, atr_threshold_tp=tp, atr_threshold_sl=sl )
+        trade, tp_price, sl_price, buy_signals_count = trade_check(i=i, current_price=current_price,entry_price=entry_price, tp_price=tp_price, sl_price=sl_price,in_pos=in_pos,df=df, prediction=prediction, std_n=std_n, atr_threshold_tp=tp, atr_threshold_sl=sl, buy_signal_count=buy_signals_count, buy_signals_threshold=buy_signal_threshold )
         
         # Entry
         if not in_pos and capital > current_price:
@@ -631,14 +671,16 @@ def optimise(symbol, window_length):
     
     """
     # TP & SL values: 0.2 → 5.0, step 0.05
-    tp_values = np.arange(0.5, 6 + 0.001, 0.5).round(2).tolist()
-    sl_values = np.arange(0.5, 6 + 0.001, 0.5).round(2).tolist()
+    tp_values = np.arange(0.5, 5.5 + 0.001, 1).round(2).tolist()
+    sl_values = np.arange(0.5, 5.5 + 0.001, 1).round(2).tolist()
 
     # std_n values: 0.1 → 5.0, step 0.1
-    std_n_values = np.arange(1, 5 + 0.001, 1).round(2).tolist()
+    std_n_values = np.arange(0.1, 5 + 0.001, 0.1).round(2).tolist()
 
     # sim_thresholds: 0.5 → 0.98, step 0.02
-    sim_thresholds = np.arange(0.1, 0.8 + 0.001, 0.1).round(2).tolist()
+    sim_thresholds = [0] #np.arange(0.0, 0.8 + 0.001, 0.2).round(2).tolist()
+
+    buy_count_thresholds = np.arange(1, 3 + 0.001, 1).round(2).tolist()
     processed_clustered = pd.read_csv(f"output/clustering_output_{symbol}.csv")
 
 
@@ -650,7 +692,7 @@ def optimise(symbol, window_length):
     max_dists = np.load("output/max_distances.npy")
 
 
-    startdate = datetime(2024, 7, 1, 13, 30, 0, tzinfo=pytz.UTC)
+    startdate = datetime(2024, 1, 1, 13, 30, 0, tzinfo=pytz.UTC)
     enddate = datetime(2025, 7, 30, 20, 30, 0, tzinfo=pytz.UTC)
 
     historic_clustered_w_avg["timestamp"] = pd.to_datetime(historic_clustered_w_avg["timestamp"], utc=True)
@@ -660,7 +702,7 @@ def optimise(symbol, window_length):
     ]
 
     results = []
-    total = len(sl_values) * len(tp_values) * len(std_n_values) * len(sim_thresholds)
+    total = len(sl_values) * len(tp_values) * len(std_n_values) * len(sim_thresholds) * len(buy_count_thresholds)
     done = 0
     print(f'Starting optimisation for {total} combinations of parameters!')
     for sim_threshold in sim_thresholds:
@@ -680,19 +722,24 @@ def optimise(symbol, window_length):
         for sl in sl_values:
             for tp in tp_values:
                 for stds in std_n_values:
-                    backtest_result = backtest(predicted, window_length=window_length, sl=sl, tp=tp, std_n=stds)
-                    if backtest_result == -1:
-                        continue
-                    results.append({
-                        "return": backtest_result['total_return'],
-                        "drawdown": backtest_result['max_drawdown'],
-                        "sl": sl,
-                        "tp": tp,
-                        "std_n": stds,
-                        "sim_threshold": sim_threshold
-                    })
-                    done += 1
-                    print(f"Completed {done} out of {total} combinations: return {backtest_result['total_return']}, drawdown: {backtest_result['max_drawdown']}")
+                    for b in buy_count_thresholds:
+                        backtest_result = backtest(predicted, window_length=window_length, sl=sl, tp=tp, std_n=stds, buy_signal_threshold=b)
+                        if backtest_result == -1:
+                            continue
+                        results.append({
+                            "return": backtest_result['total_return'],
+                            "drawdown": backtest_result['max_drawdown'],
+                            "trade_count" : backtest_result['total_trades'],
+                            "sl": sl,
+                            "tp": tp,
+                            "std_n": stds,
+                            "sim_threshold": sim_threshold,
+                            "buy_count_threshold" : b
+                        })
+                        done += 1
+                        print(f"Completed {done} out of {total} combinations: return {backtest_result['total_return']}, drawdown: {backtest_result['max_drawdown']}")
+
+                    
     results_df = pd.DataFrame(results)
     results_df.to_csv("output/optimisation_results.csv", index=False)
     print("Saved results to output/optimisation_results.csv")
@@ -728,7 +775,7 @@ def precompute_predictions(historic, cluster_centers, max_distances, startdate, 
     print(f'number of predictions with 0: {len(historic[historic["prediction"] == 0])}')
     print(f'number of predictions with 1: {len(historic[historic["prediction"] == 1])}')
     print(f'number of predictions with 2: {len(historic[historic["prediction"] == 2])}')
-
+    print(f'number of predictions with 3: {len(historic[historic["prediction"] == 3])}')
 
                     
 def delete_garbage_cluster(clustered, original_processed, cluster_id, symbol):
@@ -761,11 +808,12 @@ def optimal_front_plot(optimised_values, baseline_return):
 if __name__ == "__main__":
     optimising = 2
     window_length = 20
-    symbol ='PCG'
+    symbol ='TEM'
+
     if optimising == 1:
         optimise(symbol=symbol,window_length=window_length)
         optimal_vals = pd.read_csv("output/optimisation_results.csv")
-        optimal_front_plot(optimal_vals, -99)
+        optimal_front_plot(optimal_vals, 0)
         print("done")
     elif optimising == 0:
         # == RAW DATA RETRIEVAL ==
@@ -773,7 +821,8 @@ if __name__ == "__main__":
         startdate = datetime(2021, 1, 1, 13, 30, 0, tzinfo=pytz.UTC)
         enddate = datetime(2025, 7, 30, 20, 30, 0, tzinfo=pytz.UTC)
 
-        historic = get_historical_data(API_KEY, SECRET, f"{symbol}", startDate=startdate,endDate=enddate, t_type="h", t=2)
+        historic = get_historical_data(API_KEY, SECRET, f"{symbol}", startDate=startdate,endDate=enddate, t_type="h", t=1)
+
         # == PROCESSING RAW DATA ==
         
         historic = pd.read_csv(f"historic/{symbol}_historic_data_1min.csv")
@@ -787,7 +836,7 @@ if __name__ == "__main__":
         # == CLUSTERING == #optimise
         print("Clustering...")
         
-        split_index = int(len(processed_historic) * 0.8)
+        split_index = int(len(processed_historic) * 0.7)
         train_df = processed_historic[:split_index]
         test_df = processed_historic[split_index:]
 
@@ -797,7 +846,7 @@ if __name__ == "__main__":
         
         elbow_method(train_df, features_to_scale, features_to_pass)
         
-        clustered_df = cluster(train_df, features_to_scale, features_to_pass, k=3, symbol=symbol)
+        clustered_df = cluster(train_df, features_to_scale, features_to_pass, k=4, symbol=symbol)
         processed_clustered = pd.read_csv(f"output/clustering_output_{symbol}.csv")
 
         ##delete_garbage_cluster(processed_clustered, processed_historic, 2, symbol=symbol)
@@ -840,7 +889,7 @@ if __name__ == "__main__":
 
         precompute_predictions(historic_clustered_w_avg, cluster_centers,
                             max_distances=max_dists,
-                            startdate=datetime(2024, 7, 1, 13, 30, 0, tzinfo=pytz.UTC),
+                            startdate=datetime(2024, 4, 1, 13, 30, 0, tzinfo=pytz.UTC),
                             enddate=datetime(2025, 7, 30, 20, 30, 0, tzinfo=pytz.UTC),
                             window_size=window_length, sim_threshold=0.0, symbol=symbol)
         predicted = pd.read_csv(f"output/historic_clustered_w_avg_predicted_{symbol}.csv")\
@@ -854,14 +903,14 @@ if __name__ == "__main__":
     
     precompute_predictions(historic_clustered_w_avg, cluster_centers,
                             max_distances=max_dists,
-                            startdate=datetime(2024, 7, 1, 13, 30, 0, tzinfo=pytz.UTC),
+                            startdate=datetime(2024, 4, 1, 13, 30, 0, tzinfo=pytz.UTC),
                             enddate=datetime(2025, 7, 30, 20, 30, 0, tzinfo=pytz.UTC),
-                            window_size=window_length, sim_threshold=0.8, symbol=symbol)
+                            window_size=window_length, sim_threshold=0.0, symbol=symbol)
     
     
     predicted = pd.read_csv(f"output/historic_clustered_w_avg_predicted_{symbol}.csv")
-        #== BACKTESTING == 4.0,1.0,1.0,0.8
-    backtest_result = backtest(predicted, window_length=window_length, sl=4, tp=1, std_n=1)
+
+    backtest_result = backtest(predicted, window_length=window_length, sl=1.5, tp=2.5, std_n=0.7, buy_signal_threshold=1)
     backtest_result["df"].to_csv(f"output/backtest_result_{symbol}.csv", index=False)
         
     print("Backtest Results:")
