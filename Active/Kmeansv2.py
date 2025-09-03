@@ -5,6 +5,8 @@ from datetime import datetime
 import warnings
 from tqdm import tqdm
 import pytz
+import matplotlib.pyplot as plt
+import mplfinance as mpf
 # === Utilities ===
 from tqdm import tqdm
 # === Data Handling ===
@@ -26,10 +28,10 @@ TIMEFRAME = 'm'
 TIMEFRAME_LENGTH = 1
 SYMBOL = 'PCG'
 
-API_KEY = "PKHLDVUZSBAVJ0GWCR14"
-SECRET = "bK4CterukecekQpcg2ElddIW90MrRvggmYU36Ehg"
+API_KEY = ""
+SECRET = ""
 
-START_DATE = datetime(2022, 1, 1, 13, 30, 0, tzinfo=pytz.UTC)
+START_DATE = datetime(2025, 7, 1, 13, 30, 0, tzinfo=pytz.UTC)
 END_DATE = datetime(2025, 8, 30, 20, 30, 0, tzinfo=pytz.UTC)
 
 
@@ -315,7 +317,7 @@ def zigzag(window):
 
     return peaks, valleys
 
-def process_data(df):
+def process_data(df, save=False):
     df = df.copy()
     df.dropna()
 
@@ -325,7 +327,8 @@ def process_data(df):
     df_processed = pd.DataFrame({
         "timestamp" : df["timestamp"],
         "delta": [np.nan] * len(df),
-        "ema5_var": [np.nan] * len(df),
+        "ema3_var": [np.nan] * len(df),
+        "ema3_mean": [np.nan] * len(df),
         "atr_z": [np.nan] * len(df),
         "vol_skew": [np.nan] * len(df),
         "extrema_delta": [np.nan] * len(df),
@@ -345,9 +348,11 @@ def process_data(df):
 
 
         # delta
-        delta = np.log(window.iloc[-1]['close']) - np.log(window.iloc[0]['close'])
+        delta = (window.iloc[-1]['close'] - window.iloc[0]['close'])/window.iloc[0]['close'] * 100
 
-        # ema_5 varience
+        # ema_3 mean
+        ema_mean = slopes.diff().mean()
+        # ema_3 varience
         ema_var = slopes.diff().std()
 
         # ATR z_score
@@ -362,8 +367,8 @@ def process_data(df):
         skewness = np.mean((vol - m)**3) / den if den > 0 else 0.0
 
         # extrema_delta
-        spread = window["high"].max() - window["low"].min()
-        extrema_delta = np.log(spread) if spread > 0 else 0.0
+        extrema_delta = (window["high"].max() - window["low"].min())/window["low"].min() * 100
+
 
         # peaks and valleys
         p,v = zigzag(window)
@@ -374,24 +379,28 @@ def process_data(df):
         ts = df.iloc[i]["timestamp"]  # or df.index[i] if your index is the time
 
         df_processed.loc[i, [
-            "timestamp","delta","ema5_var","atr_z","vol_skew","extrema_delta","pv_ratio"
+            "timestamp","delta","ema3_var","ema3_mean","atr_z","vol_skew","extrema_delta","pv_ratio"
         ]] = [
             ts,            # timestamp
             delta,         
             ema_var,
+            ema_mean,
             atr_z_score,
             skewness,
             extrema_delta,
             pv_ratio
         ]
+    if save == True:
+        if not os.path.exists("processed"):
+            os.makedirs("processed") 
+
+        df_processed = df_processed[LARGE_WINDOW:]
+        df_processed = df_processed[LARGE_WINDOW:].reset_index(drop=True)
+
+        df_processed.to_csv(f"processed/{SYMBOL}_processed_data.csv", index=False)
     
-    if not os.path.exists("processed"):
-        os.makedirs("processed") 
 
-    df_processed = df_processed[LARGE_WINDOW:]
-    df_processed = df_processed[LARGE_WINDOW:].reset_index(drop=True)
-
-    df_processed.to_csv(f"processed/{SYMBOL}_processed_data.csv", index=False)
+    
     
 def elbow_method(df, columns):
     """
@@ -448,26 +457,197 @@ def assign_clusters(df, df_p):
         os.makedirs("clustered") 
     df.to_csv(f"clustered/{SYMBOL}_clustered_historic.csv", index=False)
 
+def predict(large_window, cluster_centers):
+    LARGE_WINDOW = WINDOW_LENGTH * 3
+    window = large_window[LARGE_WINDOW-WINDOW_LENGTH:-1]
+    large_window =df[0:LARGE_WINDOW-WINDOW_LENGTH]
+
+    slopes = window["close"].ewm(span=3, adjust=False).mean()
+    dollar_volumes = window["dollar_volume"]
+
+    # delta
+    delta = (window.iloc[-1]['close'] - window.iloc[0]['close'])/window.iloc[0]['close'] * 100
+
+    # ema_3 mean
+    ema_mean = slopes.diff().mean()
+    # ema_3 varience
+    ema_var = slopes.diff().std()
+    # ATR z_score
+    mL, mW = avg_atr(large_window), avg_atr(window)
+    atr_z_score = (mW - mL)/1.68 if np.isfinite(mW) and np.isfinite(mL) else 0.0
+
+    # Dollar Volume Skewness
+    vol = dollar_volumes.to_numpy()
+    m = vol.mean()
+    var = np.mean((vol - m)**2)
+    den = var**1.5
+    skewness = np.mean((vol - m)**3) / den if den > 0 else 0.0
+
+    # extrema_delta
+    extrema_delta = (window["high"].max() - window["low"].min())/window["low"].min() * 100
+
+    # peaks and valleys
+    p,v = zigzag(window)
+    pv_ratio = p/(v+1)# ATR z_score
+    mL, mW = avg_atr(large_window), avg_atr(window)
+    atr_z_score = (mW - mL)/1.68 if np.isfinite(mW) and np.isfinite(mL) else 0.0
+
+    # Dollar Volume Skewness
+    vol = dollar_volumes.to_numpy()
+    m = vol.mean()
+    var = np.mean((vol - m)**2)
+    den = var**1.5
+    skewness = np.mean((vol - m)**3) / den if den > 0 else 0.0
+
+    # extrema_delta
+    extrema_delta = (window["high"].max() - window["low"].min())/window["low"].min() * 100
+
+
+    # peaks and valleys
+    p,v = zigzag(window)
+    pv_ratio = p/(v+1)
+
+    vector = pd.DataFrame({
+        "delta": [delta],
+        "ema3_var": [ema_var],
+        "ema3_mean": [ema_mean],
+        "atr_z": [atr_z_score],
+        "vol_skew": [skewness],
+        "extrema_delta": [extrema_delta],
+        "pv_ratio": [pv_ratio]
+    })
+    
+    prediction = -1
+    min_dist = np.inf
+    for cluster in cluster_centers.index:
+        
+        center_row = cluster_centers.loc[int(cluster), ["delta", "ema3_var", "ema3_mean", "atr_z", 
+                                           "vol_skew", "extrema_delta", "pv_ratio"]]
+        
+        distance = np.linalg.norm(vector.values.flatten() - center_row.values)
+
+        if distance < min_dist:
+            prediction = int(cluster)
+            min_dist = distance
+    return prediction
+
+
+def backtest(df_test, df_c):
+    LARGE_WINDOW = WINDOW_LENGTH * 3
+    df_test = df_test.reset_index(drop=True)
+    df_test["prediction"] = [-1] * len(df_test)
+
+    cluster_centers = df_c.drop(columns=['timestamp']).groupby('cluster').mean()
+
+    pred_col = df_test.columns.get_loc("prediction")
+
+    for i in tqdm(range(LARGE_WINDOW ,len(df_test))):
+        total_window = df_test[i-LARGE_WINDOW:i+1]
+
+        prediction = predict(total_window, cluster_centers)
+        df_test.iloc[i, pred_col] = prediction
+    
+    if not os.path.exists("backtest"):
+        os.makedirs("backtest")
+    df_test.to_csv(f"backtest/{SYMBOL}_backtest_results.csv", index=False)
+
+def plot(df):
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+    df.set_index('timestamp', inplace=True)
+
+    column_mapping = {
+        'open': 'Open',
+        'high': 'High',
+        'low': 'Low',
+        'close': 'Close'
+    }
+    df = df.rename(columns=column_mapping)
+    df = df[['Open', 'High', 'Low', 'Close', 'prediction']]
+
+    # Prepare markers
+    marker_0 = pd.Series(np.nan, index=df.index)
+    marker_1 = pd.Series(np.nan, index=df.index)
+    marker_2 = pd.Series(np.nan, index=df.index)
+    marker_3 = pd.Series(np.nan, index=df.index)
+
+    cluster0 = df["prediction"] == 0
+    cluster1 = df["prediction"] == 1
+    cluster2 = df["prediction"] == 2
+    cluster3 = df["prediction"] == 3
+
+    #buy_r = df["signals"] == 1
+    #sell_r = df["signals"] == -1
+
+    marker_0[cluster0] = df['Open'][cluster0]   
+    marker_1[cluster1] = df['Open'][cluster1] 
+    marker_2[cluster2] = df['Open'][cluster2]
+    marker_3[cluster3] = df['Open'][cluster3]  
+     
+
+    #buy_marker = pd.Series(np.nan, index=df.index)
+    #sell_marker = pd.Series(np.nan, index=df.index)
+
+    #buy_marker[buy_r] = df['Open'][buy_r]
+    #sell_marker[sell_r] = df['Open'][sell_r]
+
+    # Only include non-empty addplots
+    apds = []
+    for series, kwargs in [
+        #(buy_marker, dict(type='scatter', markersize=100, marker='^', color='lime', panel=0)),
+        #(sell_marker, dict(type='scatter', markersize=100, marker='v', color='red', panel=0)),
+        (marker_0, dict(type='scatter', markersize=5, marker='o', color="#4400FF")),
+        (marker_1, dict(type='scatter', markersize=5, marker='o', color="#54EB0E")),
+        (marker_2, dict(type='scatter', markersize=5, marker='o', color="#FBFF00")),
+        (marker_3, dict(type='scatter', markersize=5, marker='o', color="#00751D"))
+
+        
+    ]:
+        if series.notna().any():  # only add if there's at least one valid point
+            apds.append(mpf.make_addplot(series, **kwargs))
+
+    plot_df = df[['Open', 'High', 'Low', 'Close']]
+
+    mpf.plot(
+        plot_df,
+        type='candle',
+        style='yahoo',
+        title='Candlestick Chart',
+        ylabel='Price',
+        volume=False,
+        addplot=apds if apds else None
+    )
+
+
+
+
 
 if __name__ == "__main__":
-    #get_data()
+    get_data()
     #analyze_volume_data()
     df = cull_data()
     #mean_reversion_analysis(df)
     #vwap_reversion_analysis(df)
-    #process_data(df)
+    #process_data(df, save=True)
     df_p = pd.read_csv(f"processed/{SYMBOL}_processed_data.csv")
 
-    col = ["delta","ema5_var","atr_z","vol_skew","extrema_delta","pv_ratio"]
+    col = ["delta","ema3_var","ema3_mean", "atr_z","vol_skew","extrema_delta","pv_ratio"]
 
     split = int(len(df_p) * 0.80) 
     df_train = df_p[:split]
-    df_test = df_p[split:]
+    df_test = df[split:]
 
     #elbow_method(df_train, col)
-    run_kmeans(df_train, col, 3)
+    run_kmeans(df_train, col, 4)
+
     df_c = pd.read_csv(f"clustered/{SYMBOL}_clustered_process.csv")
-    assign_clusters(df, df_c)
+    
+    backtest(df_test, df_c)
+    cluster_centers = df_c.drop(columns=['timestamp']).groupby('cluster').mean()
+    print(cluster_centers)
+
+    df_backtest = pd.read_csv(f"backtest/{SYMBOL}_backtest_results.csv")
+
+    plot(df_backtest)
 
 
     """
