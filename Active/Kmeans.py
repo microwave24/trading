@@ -1,5 +1,6 @@
 # === Standard Libraries ===
 import os
+from pathlib import Path
 from datetime import datetime
 import warnings
 
@@ -19,6 +20,18 @@ warnings.filterwarnings("ignore", category=InconsistentVersionWarning)
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+
+# === File I/O helpers ===
+def ensure_parent_dir(path: str) -> str:
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return str(p)
+
+def ensure_dir(path: str) -> str:
+    p = Path(path)
+    p.mkdir(parents=True, exist_ok=True)
+    return str(p)
+
 
 # === Data Handling ===
 import polars as pl
@@ -47,8 +60,8 @@ from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from databento import DBNStore
 
 # === Configuration ===
-API_KEY = "PKHLDVUZSBAVJ0GWCR14"
-SECRET = "bK4CterukecekQpcg2ElddIW90MrRvggmYU36Ehg"
+API_KEY = "PKKI3LTTYAXQTD08267W"
+SECRET = "eO6dkZWeBXetQyU71WPQNh1sAx7pc9IChmt4Fig7"
 # === Data Preperation and Analysis ===
 market_open = pd.Timestamp(year=2025, month=1, day=1, hour=9, minute=30, tz="America/New_York").time()
 market_close = pd.Timestamp(year=2025, month=1, day=1, hour=16, minute=0, tz="America/New_York").time()
@@ -155,7 +168,7 @@ def get_historical_data(api_key, secret_key, symbol, startDate, endDate, t_type=
     )
 
     print("Historical data retrieved")
-    df.write_csv(f"historic/{symbol}_historic_data_1min.csv")
+    df.write_csv(ensure_parent_dir(f"historic/{symbol}_historic_data_1min.csv"))
     print("Done!")
     return df
 
@@ -231,7 +244,7 @@ def process(df, symbol, window_length):
     df_processed = df_processed[(df_processed != 0).any(axis=1)]
     df_processed = df_processed.iloc[window_length:].reset_index(drop=True)
 
-    df_processed.to_csv(f"processed/processed_output_{symbol}.csv", index=False)
+    df_processed.to_csv(ensure_parent_dir(f"processed/processed_output_{symbol}.csv"), index=False)
     return df_processed
 
 def clear_bad(df):
@@ -346,7 +359,7 @@ def cluster(df, features_to_scale, features_to_pass, k, symbol):
     df.loc[:, 'cluster'] = labels
     print(k)
 
-    df.to_csv(f"output/clustering_output_{symbol}.csv", index=False)
+    df.to_csv(ensure_parent_dir(f"output/clustering_output_{symbol}.csv"), index=False)
     return df
     
 
@@ -356,7 +369,7 @@ def assign_clusters(historic, clustered, symbol):
     This is done to keep the original/unscaled data intact while adding cluster information.
     """
     df_merged = historic.merge(clustered[['cluster']], left_index=True, right_index=True, how='left')
-    df_merged.to_csv(f"output/historic_clustering_output_{symbol}.csv", index=False)
+    df_merged.to_csv(ensure_parent_dir(f"output/historic_clustering_output_{symbol}.csv"), index=False)
     return df_merged
 
 
@@ -366,7 +379,7 @@ def retrieve_clusters(df, output_path, cluster_count=3):
     """
     for i in range(0,cluster_count):
         cluster = df[df['cluster'] == i]
-        cluster.to_csv(f"{output_path}/cluster{i}.csv", index=False)
+        cluster.to_csv(ensure_parent_dir(f"{output_path}/cluster{i}.csv"), index=False)
 
 
 
@@ -381,7 +394,7 @@ def trade_check(
 
     # fix labels (example: 0=bullish, 1=kangaroo, 2=bear)
     bullish_c = 1
-    kangaroo_c = 3
+    kangaroo_c = 2
     bear_c = 2
 
     none = -1
@@ -533,8 +546,8 @@ def rolling_averages(df, processed, window_length, symbol):
     processed["avg_atr"] = df["avg_atr"]
 
 
-    df.to_csv("output/historic_clustered_w_avg.csv", index=False)
-    processed.to_csv(f"output/processed_output_{symbol}_w_avg.csv", index=False)
+    df.to_csv(ensure_parent_dir("output/historic_clustered_w_avg.csv"), index=False)
+    processed.to_csv(ensure_parent_dir(f"output/processed_output_{symbol}_w_avg.csv"), index=False)
 
     return df
     
@@ -741,7 +754,7 @@ def optimise(symbol, window_length):
 
                     
     results_df = pd.DataFrame(results)
-    results_df.to_csv("output/optimisation_results.csv", index=False)
+    results_df.to_csv(ensure_parent_dir("output/optimisation_results.csv"), index=False)
     print("Saved results to output/optimisation_results.csv")
 
     
@@ -766,7 +779,7 @@ def precompute_predictions(historic, cluster_centers, max_distances, startdate, 
         window = historic.iloc[i-window_size:i]
         prediction = predict(window, cluster_centers, max_distances=max_distances, sim_threshold=sim_threshold)
         historic.iloc[i, pred_col] = prediction
-    historic.to_csv(f"output/historic_clustered_w_avg_predicted_{symbol}.csv", index=True)
+    historic.to_csv(ensure_parent_dir(f"output/historic_clustered_w_avg_predicted_{symbol}.csv"), index=True)
 
     
 
@@ -788,7 +801,7 @@ def delete_garbage_cluster(clustered, original_processed, cluster_id, symbol):
 
     # Filter original_processed by removing those timestamps
     df_filtered = original_processed[~original_processed['timestamp'].isin(timestamps_to_remove)].reset_index(drop=True)
-    df_filtered.to_csv(f"processed/processed_output_{symbol}.csv", index=False)
+    df_filtered.to_csv(ensure_parent_dir(f"processed/processed_output_{symbol}.csv"), index=False)
 
 def optimal_front_plot(optimised_values, baseline_return):
     # Filter values above baseline return
@@ -809,6 +822,9 @@ if __name__ == "__main__":
     optimising = 2
     window_length = 20
     symbol ='TEM'
+
+    optimal_vals = pd.read_csv("output/optimisation_results.csv")
+    optimal_front_plot(optimal_vals, 0)
 
     if optimising == 1:
         optimise(symbol=symbol,window_length=window_length)
@@ -846,7 +862,7 @@ if __name__ == "__main__":
         
         elbow_method(train_df, features_to_scale, features_to_pass)
         
-        clustered_df = cluster(train_df, features_to_scale, features_to_pass, k=4, symbol=symbol)
+        clustered_df = cluster(train_df, features_to_scale, features_to_pass, k=3, symbol=symbol)
         processed_clustered = pd.read_csv(f"output/clustering_output_{symbol}.csv")
 
         ##delete_garbage_cluster(processed_clustered, processed_historic, 2, symbol=symbol)
@@ -883,7 +899,7 @@ if __name__ == "__main__":
         # == Prediction ==
 
         max_dists = findLargestDist(processed_historic_w_avg, cluster_centers, k=4)
-        np.save("output/max_distances.npy", max_dists)
+        np.save(ensure_parent_dir("output/max_distances.npy"), max_dists)
         max_dists = np.load("output/max_distances.npy")
         print("Max distances for each cluster:", max_dists)
 
@@ -909,9 +925,9 @@ if __name__ == "__main__":
     
     
     predicted = pd.read_csv(f"output/historic_clustered_w_avg_predicted_{symbol}.csv")
-
-    backtest_result = backtest(predicted, window_length=window_length, sl=1.5, tp=2.5, std_n=0.7, buy_signal_threshold=1)
-    backtest_result["df"].to_csv(f"output/backtest_result_{symbol}.csv", index=False)
+    #1.5,5.5,2.1,0,1.0
+    backtest_result = backtest(predicted, window_length=window_length, sl=1.5, tp=5.5, std_n=2.1, buy_signal_threshold=1)
+    backtest_result["df"].to_csv(ensure_parent_dir(f"output/backtest_result_{symbol}.csv"), index=False)
         
     print("Backtest Results:")
     print(f"Final Capital: {backtest_result['final_capital']:.2f}")
@@ -923,26 +939,5 @@ if __name__ == "__main__":
     backtest_result = pd.read_csv(f"output/backtest_result_{symbol}.csv")
 
     plot_candlestick(backtest_result)
-
-    
-
-    
-
-
-    
-    
-    
-
-
-
-
-
-
-
-
-    
-
-
-
 
     
