@@ -18,6 +18,7 @@ import seaborn as sns
 from scipy.stats import norm
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
+from itertools import product
 
 
 # === Alpaca & Databento ===
@@ -27,9 +28,9 @@ from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 # === Variables ===
 WINDOW_LENGTH = 20
-TIMEFRAME = 'm'
+TIMEFRAME = 'h'
 TIMEFRAME_LENGTH = 1
-SYMBOL = 'PCG'
+SYMBOL = 'TPET'
 
 API_KEY = "PKKI3LTTYAXQTD08267W"
 SECRET = "eO6dkZWeBXetQyU71WPQNh1sAx7pc9IChmt4Fig7"
@@ -464,6 +465,22 @@ def cull_data():
 
     return df
 
+def get_highs(df):
+    df = df.copy()
+    df['p'] = 0
+    rolling_max = df['high'].rolling(window=5, center=True).max()
+    df['p'] = np.where(df['high'] == rolling_max, 1, 0)
+
+    return sum(df['p'])
+
+def get_lows(df):
+    df = df.copy()
+    df['v'] = 0
+    rolling_max = df['low'].rolling(window=5, center=True).min()
+    df['v'] = np.where(df['low'] == rolling_max, 1, 0)
+
+    return sum(df['v'])
+
 
 
 def zigzag(window):
@@ -538,8 +555,7 @@ def process_data(df, save=False):
         "ema_spread": [np.nan] * len(df),
         "ema_mean": [np.nan] * len(df),
         "atr_spread": [np.nan] * len(df),
-        "peaks": [np.nan] * len(df),
-        "valleys": [np.nan] * len(df),
+        "pv_ratio": [np.nan] * len(df)
     })
 
     
@@ -578,22 +594,27 @@ def process_data(df, save=False):
         atr_spread = tr.std()
 
         # peaks and valleys
-        p,v = zigzag(window)
+        p = get_highs(window)
+        v = get_lows(window)
+
+        if v == 0:
+            v = 1  # to avoid division by zero
+
+        ratio = p / v  # +1 to avoid division by zero
 
         # adding to the processed df
 
         ts = df.iloc[i]["timestamp"]  # or df.index[i] if your index is the time
 
         df_processed.loc[i, [
-            "timestamp","delta","ema_spread","ema_mean","atr_spread","peaks", "valleys"
+            "timestamp","delta","ema_spread","ema_mean","atr_spread","pv_ratio"
         ]] = [
             ts,            # timestamp
             delta,         
             ema_spread,
             ema_mean,
             atr_spread,
-            p,
-            v
+            ratio
         ]
     if save == True:
         if not os.path.exists("processed"):
@@ -749,7 +770,8 @@ def predict(window, cluster_centers):
 
 
     # peaks and valleys
-    p,v = zigzag(window)
+    p = get_highs(window)
+    v = get_lows(window)
 
 
     # adding to the processed df
@@ -758,8 +780,7 @@ def predict(window, cluster_centers):
         "ema_spread": [ema_spread],
         "ema_mean": [ema_mean],
         "atr_spread": [atr_spread],
-        "peaks": [p],
-        "valleys": [v]
+        "pv_ratio": [p / (v if v != 0 else 1)]
     })
 
     
@@ -767,7 +788,7 @@ def predict(window, cluster_centers):
     min_dist = np.inf
     for cluster in cluster_centers.index:
         
-        center_row = cluster_centers.loc[int(cluster), ["delta", "ema_spread", "ema_mean", "atr_spread", "peaks", "valleys"]]
+        center_row = cluster_centers.loc[int(cluster), ["delta", "ema_spread", "ema_mean", "atr_spread", "pv_ratio"]]
         
         distance = np.linalg.norm(vector.values.flatten() - center_row.values)
 
@@ -777,156 +798,155 @@ def predict(window, cluster_centers):
 
     return prediction
 
-def trade_fast(pred, in_pos, price, high, low,
-               mean, stdev, atr, dollar_volume,
-               take_price, stop_price, entry_price,
-               take_stdev_n=0.0, stop_stdev_n=0.0, entry_stdev_n=2.0,
-               allowed_clusters=frozenset((2,)), dv_floor=40000.0):
-    sell_price = np.nan
-
-    # liquidity gate
-    if dollar_volume < dv_floor:
-        return in_pos, take_price, stop_price, entry_price, sell_price, -1  # hold
-
+def trade_check(open_price, mean, std, atr, tp_atr, sl_atr, stdev_n,
+                in_pos, take_price, stop_price):
     if not in_pos:
-        # entry
-        if (pred in allowed_clusters) and (price <= mean - entry_stdev_n * stdev):
-            entry_price = price
-            take_price  = price + take_stdev_n * atr
-            stop_price  = price - stop_stdev_n * atr
-            return True, take_price, stop_price, entry_price, sell_price, 1  # buy
-        return in_pos, take_price, stop_price, entry_price, sell_price, -1   # hold
+        # enter position
+        if open_price < mean - stdev_n * std:
+            take_price = open_price + tp_atr * atr
+            stop_price = open_price - sl_atr * atr
+            in_pos = True
+            return 1, take_price, stop_price, in_pos  # buy signal
+    else:
+        # exit position
+        if open_price >= take_price or open_price <= stop_price:
+            in_pos = False
+            return -1, take_price, stop_price, in_pos  # sell signal
 
-    # in position: exits on touch or cross
-    hit_take = (take_price == take_price) and (high >= take_price or price >= take_price)   # guards NaN
-    hit_stop = (stop_price == stop_price) and (low  <= stop_price or price <= stop_price)
 
-    if hit_take:
-        sell_price = take_price
-        return False, np.nan, np.nan, entry_price, sell_price, 0            # sell
-    if hit_stop:
-        sell_price = stop_price
-        return False, np.nan, np.nan, entry_price, sell_price, 0            # sell
+    return 0, take_price, stop_price, in_pos  # hold signal
 
-    return in_pos, take_price, stop_price, entry_price, sell_price, -1      # hold
+def backtest(df, stdev_n=2, tp_atr=1, sl_atr=1, trade_cluster=0,
+             initial_capital=10000.0, save=False):
+    mean = df['mean_close'].to_numpy()
+    std = df['std_close'].to_numpy()
+    atr = df['atr'].to_numpy()
+    open_price = df['open'].to_numpy()
+    prediction = df['prediction'].to_numpy()
 
-def backtest(df, window_length, sl, tp, std_n=2.0, buy_signal_threshold=1,
-             trade_clusters=(2,), trade_cost=0.99, starting_capital=10000.0):
-    # inputs
-    d = df.reset_index(drop=True)
-    n = len(d)
-    w = int(window_length)
+    volume = df['dollar_volume'].to_numpy()
 
-    # array views
-    o = d["open"].to_numpy(dtype=float, copy=False)
-    h = d["high"].to_numpy(dtype=float, copy=False)
-    l = d["low"].to_numpy(dtype=float, copy=False)
-    mc = d["mean_close"].to_numpy(dtype=float, copy=False)
-    sc = d["std_close"].to_numpy(dtype=float, copy=False)
-    at = d["atr"].to_numpy(dtype=float, copy=False)
-    dv = d["dollar_volume"].to_numpy(dtype=float, copy=False)
-    pr = d["prediction"].to_numpy(copy=False)
+    signals = np.zeros(len(df))
+    equity = np.full(len(df), np.nan, dtype=float)
+    drawdown_pct = np.full(len(df), np.nan, dtype=float)
+    trade_pnl = np.full(len(df), np.nan, dtype=float)
 
-    # state
-    capital = float(starting_capital)
-    qty = 0
     in_pos = False
-    entry_price = 0.0
-    tp_price = np.nan
-    sl_price = np.nan
-    wins = 0
-    total_trades = 0
-    peak_capital = capital
+    take_price = 0.0
+    stop_price = 0.0
+
+    capital = float(initial_capital)
+    peak_equity = capital
     max_drawdown = 0.0
 
-    # outputs
-    signals = [0] * n     # 1=buy, -1=sell, 0=hold
-    capital_history = np.full(n, capital, dtype=np.float64)
+    entry_price = np.nan
+    entry_capital = capital
+    qty = 0.0  # full-port position size in units when in a trade
 
-    allowed = frozenset(trade_clusters)
+    wins = 0
+    total_trades = 0
 
-    # loop
-    for i in range(w, n):
-        price = o[i]; high = h[i]; low = l[i]
-        pred  = pr[i]
+    for i in range(WINDOW_LENGTH, len(df)):
+        # mark-to-market before state change
+        equity_i = qty * open_price[i] if in_pos and np.isfinite(entry_price) else capital
+        if volume[i] < 40000:
+            continue  # skip low volume bars
 
-        # trade decision via fast path
-        in_pos_new, tp_price_new, sl_price_new, entry_price_new, sell_price, decision = trade_fast(
-            pred, in_pos, price, high, low,
-            mc[i], sc[i], at[i], dv[i],
-            tp_price, sl_price, entry_price,
-            take_stdev_n=tp, stop_stdev_n=sl, entry_stdev_n=std_n,
-            allowed_clusters=allowed
-        )
-
-        # entry
-        if (not in_pos) and (decision == 1):
-            if capital > price:  # afford 1 share at least
-                capital -= trade_cost
-                qty = int(capital // price)
-                if qty > 0:
-                    capital -= qty * price
-                    in_pos = True
-                    entry_price = price
-                    tp_price = tp_price_new
-                    sl_price = sl_price_new
-                    total_trades += 1
-                    signals[i] = 1
-                else:
-                    # revert fee if no fill
-                    capital += trade_cost
-            # portfolio value after entry
-            current_value = capital + (qty * price if in_pos else 0)
-
-        # exit
-        elif in_pos and decision == 0:
-            exit_px = sell_price if sell_price == sell_price else price  # prefer barrier fill
-            capital += qty * exit_px
-            capital -= trade_cost
-            wins += 1 if exit_px > entry_price else 0
-            qty = 0
-            in_pos = False
-            entry_price = 0.0
-            tp_price = np.nan
-            sl_price = np.nan
-            signals[i] = -1
-            current_value = capital
-
+        # generate signal only when inputs are valid and cluster matches
+        if prediction[i] == trade_cluster and not (
+            np.isnan(mean[i]) or np.isnan(std[i]) or np.isnan(atr[i])
+        ):
+            signal, take_price, stop_price, in_pos_next = trade_check(
+                open_price[i], mean[i], std[i], atr[i],
+                tp_atr, sl_atr, stdev_n,
+                in_pos, take_price, stop_price
+            )
         else:
-            # hold
-            in_pos = in_pos_new
-            tp_price = tp_price_new
-            sl_price = sl_price_new
-            entry_price = entry_price_new
-            current_value = capital + (qty * price if in_pos else 0)
+            signal = 0
+            in_pos_next = in_pos
+
+        # handle transitions
+        if signal == 1:
+            # enter with full capital
+            entry_price = open_price[i]
+            entry_capital = capital - 0.99
+            qty = 0.0 if entry_price <= 0 or not np.isfinite(entry_price) else entry_capital / entry_price
+
+        elif signal == -1:
+            # exit and realize PnL
+            if np.isfinite(entry_price) and qty > 0:
+                exit_val = qty * open_price[i]
+                pnl = exit_val - entry_capital
+                capital = exit_val - 0.99
+                trade_pnl[i] = pnl
+                total_trades += 1
+                if pnl > 0:
+                    wins += 1
+            entry_price = np.nan
+            entry_capital = capital
+            qty = 0.0
+
+        # after applying signal, recompute equity mark
+        equity_i = qty * open_price[i] if in_pos_next and np.isfinite(entry_price) else capital
+        equity[i] = equity_i
 
         # drawdown tracking
-        if current_value > peak_capital:
-            peak_capital = current_value
-        dd = (peak_capital - current_value) / peak_capital * 100.0
+        if equity_i > peak_equity:
+            peak_equity = equity_i
+        dd = 0.0 if peak_equity <= 0 else (peak_equity - equity_i) / peak_equity
+        drawdown_pct[i] = dd
         if dd > max_drawdown:
             max_drawdown = dd
 
-        capital_history[i] = current_value
+        # finalize for next loop
+        in_pos = in_pos_next
+        signals[i] = signal
 
-    # finalization
-    final_price = o[-1] if in_pos else 0.0
-    final_portfolio_value = capital + (qty * final_price if in_pos else 0.0)
-    total_return = (final_portfolio_value - starting_capital) / starting_capital * 100.0
-    winrate = (wins / total_trades * 100.0) if total_trades > 0 else 0.0
+    # optional forced close on last bar
+    if in_pos and np.isfinite(entry_price) and qty > 0:
+        exit_val = qty * open_price[-1]
+        pnl = exit_val - entry_capital
+        capital = exit_val
+        trade_pnl[-1] = pnl
+        total_trades += 1
+        if pnl > 0:
+            wins += 1
+        in_pos = False
+        qty = 0.0
+        equity[-1] = capital
+        if capital > peak_equity:
+            peak_equity = capital
+        dd = 0.0 if peak_equity <= 0 else (peak_equity - capital) / peak_equity
+        drawdown_pct[-1] = dd
+        if dd > max_drawdown:
+            max_drawdown = dd
 
-    d["signals"] = signals
-    print("Number of -1 signals (sell):", signals.count(-1))
-    print("Number of 1 signals (buy):", signals.count(1))
-    return {
-        "df": d,
-        "final_capital": final_portfolio_value,
-        "total_return": total_return,
-        "max_drawdown": max_drawdown,
-        "winrate": winrate,
+    winrate = 0.0 if total_trades == 0 else (wins / total_trades) * 100.0
+
+    # write outputs
+    df = df.copy()
+    df['signals'] = signals
+    df['equity'] = equity
+    df['drawdown_pct'] = drawdown_pct
+    df['trade_pnl'] = trade_pnl
+    if save:
+        if not os.path.exists("backtest"):
+            os.makedirs("backtest")
+        df.to_csv(f"backtest/{SYMBOL}_backtest.csv", index=False)
+
+    
+    stats = {
+        "initial_capital": initial_capital,
+        "final_capital": capital,
+        "net_return_pct": 0.0 if initial_capital == 0 else (capital / initial_capital - 1.0) * 100.0,
+        "max_drawdown_pct": max_drawdown * 100.0,
+        "wins": wins,
         "total_trades": total_trades,
-        "capital_history": capital_history,
+        "winrate_pct": winrate,
     }
+    return stats
+
+
 
 def plot(df):
     
@@ -971,11 +991,11 @@ def plot(df):
     # Only include non-empty addplots
     apds = []
     for series, kwargs in [
-        (buy_marker, dict(type='scatter', markersize=100, marker='^', color='lime', panel=0)),
-        (sell_marker, dict(type='scatter', markersize=100, marker='v', color='red', panel=0)),
+        #(buy_marker, dict(type='scatter', markersize=100, marker='^', color='lime', panel=0)),
+        #(sell_marker, dict(type='scatter', markersize=100, marker='v', color='red', panel=0)),
         (marker_0, dict(type='scatter', markersize=5, marker='o', color="#FF0000")),
-        (marker_1, dict(type='scatter', markersize=5, marker='o', color="#54EB0E")),
-        (marker_2, dict(type='scatter', markersize=5, marker='o', color="#2600FF")),
+        (marker_1, dict(type='scatter', markersize=5, marker='o', color="#0E24EB")),
+        (marker_2, dict(type='scatter', markersize=5, marker='o', color="#15FF00")),
         (marker_3, dict(type='scatter', markersize=5, marker='o', color="#A200FF"))
 
         
@@ -996,7 +1016,18 @@ def plot(df):
     )
 
 
-
+def pretty_print(stats):
+    fnum = lambda v: f"{float(v):,.2f}"
+    fpct = lambda v: f"{float(v):,.2f}%"
+    print(
+        f"{'Initial capital:':<18}{fnum(stats['initial_capital'])}\n"
+        f"{'Final capital:':<18}{fnum(stats['final_capital'])}\n"
+        f"{'Net return:':<18}{fpct(stats['net_return_pct'])}\n"
+        f"{'Max drawdown:':<18}{fpct(stats['max_drawdown_pct'])}\n"
+        f"{'Wins:':<18}{stats['wins']:,}\n"
+        f"{'Total trades:':<18}{stats['total_trades']:,}\n"
+        f"{'Win rate:':<18}{fpct(stats['winrate_pct'])}"
+    )
 
 
     
@@ -1018,8 +1049,8 @@ def generate_rolling_data(df):
     out = df.copy()
 
     # rolling mean/std in C
-    out["mean_close"] = out["close"].rolling(w).mean()
-    out["std_close"]  = out["close"].rolling(w).std(ddof=1)
+    out["mean_close"] = out["close"].rolling(w).mean().shift(1)
+    out["std_close"]  = out["close"].rolling(w).std(ddof=1).shift(1)
 
     # ATR (vectorized True Range)
     prev_close = out["close"].shift(1)
@@ -1029,7 +1060,7 @@ def generate_rolling_data(df):
         (out["low"]  - prev_close).abs().to_numpy()
     ])
     # simple ATR = rolling mean of TR
-    out["atr"] = pd.Series(tr, index=out.index).rolling(w).mean()
+    out["atr"] = pd.Series(tr, index=out.index).rolling(w).mean().shift(1)
     # Wilder alternative (uncomment if needed)
 
     # drop warmup rows without using dropna
@@ -1039,19 +1070,63 @@ def generate_rolling_data(df):
     out.to_csv(f"ready/{SYMBOL}_test_data.csv", index=False)
     return out
 
+def optimise(df_test):
+    stdevs  = np.arange(0.0, 3.0, 0.2)
+    tp_atrs = np.arange(0.5, 10.0, 0.5)
+    sl_atrs = np.arange(0.5, 10.0, 0.5)
 
+    dtype = [
+        ("return", "f8"), ("drawdown", "f8"), ("winrate", "f8"),
+        ("trades", "i4"), ("tp", "f8"), ("sl", "f8"), ("stdev", "f8"),
+    ]
+
+    total = stdevs.size * tp_atrs.size * sl_atrs.size
+    results = np.empty(total, dtype=dtype)
+
+    i = 0
+    for stdev, tp, sl in product(stdevs, tp_atrs, sl_atrs):
+        stats = backtest(df_test, stdev_n=stdev, tp_atr=tp, sl_atr=sl, trade_cluster=2, save=False)
+        results[i] = (
+            float(stats["net_return_pct"]),
+            float(stats["max_drawdown_pct"]),
+            float(stats["winrate_pct"]),
+            int(stats["total_trades"]),
+            float(tp), float(sl), float(stdev),
+        )
+        i += 1
+        print(f"Completed {i}/{total}", end="\r")
+            
+
+    df = pd.DataFrame.from_records(results)
+    os.makedirs("optimisation", exist_ok=True)
+    df.to_csv(f"optimisation/{SYMBOL}_optimisation.csv", index=False)
+    plot_optimisation()
+
+
+
+def plot_optimisation():
+    df = pd.read_csv(f"optimisation/{SYMBOL}_optimisation.csv")
+
+    plt.figure(figsize=(10, 6))
+    sc = plt.scatter(df["drawdown"], df["return"], c=df["winrate"], cmap='viridis', alpha=0.7)
+    plt.colorbar(sc, label='Win Rate (%)')
+    plt.xlabel('Max Drawdown (%)')
+    plt.ylabel('Net Return (%)')
+    plt.title('Optimization Results')
+    plt.grid(True)
+    plt.show()
 
 if __name__ == "__main__":
-    #get_data()
+    get_data()
     #analyze_volume_data()
     df = cull_data()
     #atr_reversion_analysis(df[int(len(df)*0.9):])
     #mean_reversion_analysis(df)
     #vwap_reversion_analysis(df)
-    #process_data(df, save=True)
+    process_data(df, save=True)
     df_p = pd.read_csv(f"processed/{SYMBOL}_processed_data.csv")
 
-    col = ["delta","ema_spread","ema_mean", "atr_spread","peaks","valleys"]
+    col = ["delta","ema_spread","ema_mean", "atr_spread","pv_ratio"]
 
     #print(len(df_p))
     split = int(len(df_p)*0.75)
@@ -1077,32 +1152,15 @@ if __name__ == "__main__":
     generate_predictions(d[(int)(len(d)*0):], cluster_centers)
     
     df_test = pd.read_csv(f"historic_predicted/{SYMBOL}_historic_predicted.csv")
-    res = backtest(
-        df=df_test,                 # your feature-augmented DataFrame
-        window_length=WINDOW_LENGTH,      # warmup equal to your rolling window
-        sl=4.0,                # stop = 2 * ATR
-        tp=4.0,                # take = 1.5 * ATR
-        std_n=0.5,             # entry at mean - 2*std
-        buy_signal_threshold=1,
-        trade_clusters=(2,),   # enter only when prediction in these clusters
-        trade_cost=0.99,
-        starting_capital=10000.0
-    )
+    #stats = backtest(df_test, stdev_n=2, tp_atr=4, sl_atr=4, trade_cluster=1)
 
+    optimise(df_test)
     
-    if not os.path.exists("backtest"):
-        os.makedirs("backtest")
-    res["df"].to_csv(f"backtest/{SYMBOL}_backtest_results.csv", index=False)
-
-    print(f"Final capital: ${res['final_capital']:.2f}")
-    print(f"Total return: {res['total_return']:.2f}%")    
-    print(f"Max drawdown: {res['max_drawdown']:.2f}%")
-    print(f"Winrate: {res['winrate']:.2f}% over {res['total_trades']} trades")
+    
 
 
-
-    df_backtest = pd.read_csv(f"backtest/{SYMBOL}_backtest_results.csv")
-    plot(df_backtest)
+    #df_backtest = pd.read_csv(f"backtest/{SYMBOL}_backtest.csv")
+    #plot(df_backtest)
 
 
     """

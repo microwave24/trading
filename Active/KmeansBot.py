@@ -17,96 +17,104 @@ import pandas as pd
 import numpy as np
 
 # === Configuration ===
-API_KEY = "PKHLDVUZSBAVJ0GWCR14"
-SECRET = "bK4CterukecekQpcg2ElddIW90MrRvggmYU36Ehg"
+API_KEY = "PKKI3LTTYAXQTD08267W"
+SECRET = "eO6dkZWeBXetQyU71WPQNh1sAx7pc9IChmt4Fig7"
 # === Data Preperation and Analysis ===
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 
-SOCKET = "wss://stream.data.alpaca.markets/v2/iex"
-SYMBOL = 'NVDA'
+SOCKET = "wss://stream.data.alpaca.markets/v2/delayed_sip"
+SYMBOL = 'PCG'
 
 df = pd.DataFrame(columns=["symbol", "timestamp", "close_price"])
+bars = pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+current_bar = {}
 
 def on_open(ws):
     print("opened")
-
-    auth_data = {
-        "action": "auth",
-        "key": API_KEY,
-        "secret": SECRET
-    }
-    ws.send(json.dumps(auth_data))
-
-    # subscribe to TSLA trades, quotes, or bars
-    listen_message = {
+    ws.send(json.dumps({"action": "auth", "key": API_KEY, "secret": SECRET}))
+    ws.send(json.dumps({
         "action": "subscribe",
-        "trades": [SYMBOL],    # trade prints
-        "quotes": [SYMBOL],    # bid/ask
-        "bars": [SYMBOL]       # OHLCV bars
-    }
-    ws.send(json.dumps(listen_message))
+        "trades": [SYMBOL],
+        "quotes": [SYMBOL],
+        "bars":   [SYMBOL]
+    }))
 
-current_bar = {}
+def on_error(ws, error):
+    print("ERROR:", error)
+
+def on_close(ws, code, msg):
+    print("closed connection", code, msg)
+
 def on_message(ws, message):
-    global df, current_bar
     data = json.loads(message)
-
+    # Alpaca sends acks like {"T":"success","msg":"connected"} and {"T":"subscription", ...}
+    if isinstance(data, dict):
+        data = [data]
     for msg in data:
-        if msg.get("T") == "t":  # trade
-            ts = pd.to_datetime(msg["t"]).tz_convert("America/New_York")
-            minute = ts.floor("s")
-            print(minute)
-            price = round(msg["p"], 3)
+        t = msg.get("T")
+        if t == "success":
+            print(">>", msg.get("msg"))
+            continue
+        if t == "subscription":
+            print(">> subscribed:", msg)
+            continue
+        if t == "error":
+            print(">> SERVER ERROR:", msg)
+            continue
+        if t == "t":  # trade
+            ts = pd.to_datetime(msg["t"], utc=True).tz_convert("America/New_York")
+            price = float(round(msg["p"], 3))
+            size = int(msg["s"])
+            update_bar(ts, price, size)
 
-            if current_bar.get("timestamp") != minute:
-                # save old bar if exists
-                if current_bar:
-                    df = pd.concat([df, pd.DataFrame([current_bar])], ignore_index=True)
-                    df = df.tail(200).reset_index(drop=True)
+def update_bar(ts, price, size):
+    global bars, current_bar
 
-                # start a new bar
-                current_bar = {
-                    "timestamp": minute,
-                    "close_price": price
-                }
-            else:
-                # update existing bar's close
-                current_bar["close_price"] = price
-            
+    bar_time = ts.floor("H")
 
+    # new hour → finalize old bar
+    if current_bar.get("timestamp") != bar_time:
+        if current_bar:  # append finalized old bar
+            bars = pd.concat([bars, pd.DataFrame([current_bar])], ignore_index=True)
+        # start a new bar
+        current_bar = {
+            "timestamp": bar_time,
+            "open": price,
+            "high": price,
+            "low": price,
+            "close": price,
+            "volume": size
+        }
+    else:
+        # update existing bar
+        current_bar["high"] = max(current_bar["high"], price)
+        current_bar["low"]  = min(current_bar["low"], price)
+        current_bar["close"] = price
+        current_bar["volume"] += size
 
-            
+    # --- Write bars + current bar together ---
+    combined = bars.copy()
+    if current_bar:  # ensure it's included
+        # if last row is same timestamp, drop it first
+        if not combined.empty and combined.iloc[-1]["timestamp"] == current_bar["timestamp"]:
+            combined = combined.iloc[:-1]
+        combined = pd.concat([combined, pd.DataFrame([current_bar])], ignore_index=True)
 
-
-
-def on_close(ws, close_status_code, close_msg):
-    print("closed connection")
-
+    combined.to_csv(f"{SYMBOL}_realtime_bars.csv", index=False)
 
 def run_ws():
-    ws = websocket.WebSocketApp(SOCKET,
-                                on_open=on_open,
-                                on_message=on_message,
-                                on_close=on_close)
+    ws = websocket.WebSocketApp(
+        SOCKET,
+        on_open=on_open,
+        on_message=on_message,
+        on_error=on_error,
+        on_close=on_close,
+    )
+    # pings help keep some networks happy
     ws.run_forever()
 
-def animate(i):
-    if not df.empty:
-        ax.clear()
-        ax.plot(df["timestamp"], df["close_price"], marker="o")
-        ax.set_title("Live Price Stream")
-        ax.set_xlabel("Time")
-        ax.set_ylabel("Price ($)")
-        fig.autofmt_xdate()
-
-
 if __name__ == "__main__":
-    
-    ws_thread = threading.Thread(target=run_ws, daemon=True)
-    ws_thread.start()
-
-    fig, ax = plt.subplots()
-    ani = animation.FuncAnimation(fig, animate, interval=1000,
-                              save_count=200)
-    plt.show()
+    # EITHER run on main thread:
+    run_ws()
+    print("WS thread terminated")
