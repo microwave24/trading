@@ -30,10 +30,10 @@ from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 WINDOW_LENGTH = 20
 TIMEFRAME = 'h'
 TIMEFRAME_LENGTH = 1
-SYMBOL = 'TPET'
+SYMBOL = 'NVDA'
 
-API_KEY = "PKKI3LTTYAXQTD08267W"
-SECRET = "eO6dkZWeBXetQyU71WPQNh1sAx7pc9IChmt4Fig7"
+API_KEY = "PKF43TF96CSNU75ML78H"
+SECRET = "7dvMBcfe1DRzh8PkThpAP83NcUjOzidZTTOfjMaC"
 
 START_DATE = datetime(2022, 1, 30, 13, 30, 0, tzinfo=pytz.UTC)
 END_DATE = datetime(2025, 8, 30, 20, 30, 0, tzinfo=pytz.UTC)
@@ -799,15 +799,15 @@ def predict(window, cluster_centers):
     return prediction
 
 def trade_check(open_price, mean, std, atr, tp_atr, sl_atr, stdev_n,
-                in_pos, take_price, stop_price):
-    if not in_pos:
+                in_pos, take_price, stop_price, prediction, trade_cluster=0):
+    if not in_pos and prediction == trade_cluster:
         # enter position
         if open_price < mean - stdev_n * std:
             take_price = open_price + tp_atr * atr
             stop_price = open_price - sl_atr * atr
             in_pos = True
             return 1, take_price, stop_price, in_pos  # buy signal
-    else:
+    elif in_pos:
         # exit position
         if open_price >= take_price or open_price <= stop_price:
             in_pos = False
@@ -853,17 +853,11 @@ def backtest(df, stdev_n=2, tp_atr=1, sl_atr=1, trade_cluster=0,
             continue  # skip low volume bars
 
         # generate signal only when inputs are valid and cluster matches
-        if prediction[i] == trade_cluster and not (
-            np.isnan(mean[i]) or np.isnan(std[i]) or np.isnan(atr[i])
-        ):
-            signal, take_price, stop_price, in_pos_next = trade_check(
+        signal, take_price, stop_price, in_pos_next = trade_check(
                 open_price[i], mean[i], std[i], atr[i],
                 tp_atr, sl_atr, stdev_n,
-                in_pos, take_price, stop_price
+                in_pos, take_price, stop_price, prediction[i], trade_cluster
             )
-        else:
-            signal = 0
-            in_pos_next = in_pos
 
         # handle transitions
         if signal == 1:
