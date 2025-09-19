@@ -30,10 +30,10 @@ from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 WINDOW_LENGTH = 20
 TIMEFRAME = 'h'
 TIMEFRAME_LENGTH = 1
-SYMBOL = 'NVDA'
+SYMBOL = 'TEM'
 
-API_KEY = "PKF43TF96CSNU75ML78H"
-SECRET = "7dvMBcfe1DRzh8PkThpAP83NcUjOzidZTTOfjMaC"
+API_KEY = "PK7LLGFUSPUL7PRPME8M"
+SECRET = "yvT87Fi7AbxM1xbF48gCbhxlsNNQPKF3wV33iSLw"
 
 START_DATE = datetime(2022, 1, 30, 13, 30, 0, tzinfo=pytz.UTC)
 END_DATE = datetime(2025, 8, 30, 20, 30, 0, tzinfo=pytz.UTC)
@@ -641,7 +641,7 @@ def run_kmeans(df, columns, k=3, random_state=42):
     if not os.path.exists("clustered"):
             os.makedirs("clustered") 
 
-    df.to_csv(f"clustered/{SYMBOL}_clustered_process.csv", index=False)
+    df.to_csv(f"clustered/{SYMBOL}_means_clustered_process.csv", index=False)
     return df
         
 
@@ -698,7 +698,7 @@ def run_kmedians(df, columns, k=3, max_iter=500, tol=1e-4, random_state=42):
         medians = new_medians
 
     df["cluster"] = labels
-    df.to_csv(f"clustered/{SYMBOL}_clustered_process.csv", index=False)
+    df.to_csv(f"clustered/{SYMBOL}_meds_clustered_process.csv", index=False)
     return df, medians
 
 def elbow_method_kmedians(df, columns, max_k=11, random_state=42):
@@ -1037,6 +1037,7 @@ def generate_predictions(df, cluster_centers):
 
     os.makedirs("historic_predicted", exist_ok=True)
     df.to_csv(f"historic_predicted/{SYMBOL}_historic_predicted.csv", index=False)
+    return df
 
 def generate_rolling_data(df):
     w = WINDOW_LENGTH
@@ -1064,38 +1065,66 @@ def generate_rolling_data(df):
     out.to_csv(f"ready/{SYMBOL}_test_data.csv", index=False)
     return out
 
-def optimise(df_test):
+def optimise(d):
     stdevs  = np.arange(0.0, 3.0, 0.2)
     tp_atrs = np.arange(0.5, 10.0, 0.5)
     sl_atrs = np.arange(0.5, 10.0, 0.5)
 
     dtype = [
-        ("return", "f8"), ("drawdown", "f8"), ("winrate", "f8"),
-        ("trades", "i4"), ("tp", "f8"), ("sl", "f8"), ("stdev", "f8"),
+        ("return", "f8"),       # float64
+        ("drawdown", "f8"),     # float64
+        ("winrate", "f8"),      # float64
+        ("trades", "i4"),       # int32
+        ("tp", "f8"),           # float64
+        ("sl", "f8"),           # float64
+        ("stdev", "f8"),        # float64
+        ("cluster", "i4"),      # int32
+        ("technique", "U50"),   # fixed-length unicode string
     ]
 
-    total = stdevs.size * tp_atrs.size * sl_atrs.size
+    
+
+    trading_clusters = 3
+    clustering_techniques = ["Kmeans", "Kmedians"]
+
+    total = stdevs.size * tp_atrs.size * sl_atrs.size * trading_clusters * len(clustering_techniques)
     results = np.empty(total, dtype=dtype)
 
     i = 0
-    for stdev, tp, sl in product(stdevs, tp_atrs, sl_atrs):
-        stats = backtest(df_test, stdev_n=stdev, tp_atr=tp, sl_atr=sl, trade_cluster=2, save=False)
-        results[i] = (
-            float(stats["net_return_pct"]),
-            float(stats["max_drawdown_pct"]),
-            float(stats["winrate_pct"]),
-            int(stats["total_trades"]),
-            float(tp), float(sl), float(stdev),
-        )
-        i += 1
-        print(f"Completed {i}/{total}", end="\r")
+    for technique in clustering_techniques:
+
+        if technique == "Kmeans":
+            df_c = pd.read_csv(f"clustered/{SYMBOL}_means_clustered_process.csv")
+        else:
+            df_c = pd.read_csv(f"clustered/{SYMBOL}_meds_clustered_process.csv")
+
+        cluster_centers = df_c.drop(columns=['timestamp']).groupby('cluster').mean()
+        print(f"Cluster centers for {technique}:")
+        print(cluster_centers)
+        df_test = generate_predictions(d[(int)(len(d)*0):], cluster_centers)
+    
+        for cluster in range(trading_clusters):
+            for stdev, tp, sl in product(stdevs, tp_atrs, sl_atrs):
+                stats = backtest(df_test, stdev_n=stdev, tp_atr=tp, sl_atr=sl, trade_cluster=2, save=False)
+                results[i] = (
+                    float(stats["net_return_pct"]),
+                    float(stats["max_drawdown_pct"]),
+                    float(stats["winrate_pct"]),
+                    int(stats["total_trades"]),
+                    float(tp), float(sl), float(stdev), int(cluster), str(technique)
+                )
+                i += 1
+                print(f"Completed {i}/{total}", end="\r")
+        
             
+            
+    
+    
 
     df = pd.DataFrame.from_records(results)
     os.makedirs("optimisation", exist_ok=True)
     df.to_csv(f"optimisation/{SYMBOL}_optimisation.csv", index=False)
     plot_optimisation()
-
 
 
 def plot_optimisation():
@@ -1112,42 +1141,29 @@ def plot_optimisation():
 
 if __name__ == "__main__":
     get_data()
-    #analyze_volume_data()
     df = cull_data()
-    #atr_reversion_analysis(df[int(len(df)*0.9):])
-    #mean_reversion_analysis(df)
-    #vwap_reversion_analysis(df)
     process_data(df, save=True)
     df_p = pd.read_csv(f"processed/{SYMBOL}_processed_data.csv")
-
     col = ["delta","ema_spread","ema_mean", "atr_spread","pv_ratio"]
 
-    #print(len(df_p))
     split = int(len(df_p)*0.75)
     df_train = df_p[:split]
     df_test = df[split:]
-    #elbow_method_kmedians(df_train, col, max_k=10)
-    #elbow_method(df_train, col)
+
     run_kmeans(df_train, col, k=3)
-    
-    #elbow_method_kmedians(df_train, col, max_k=10)
-    #run_kmedians(df_train, col, k=5)
+    run_kmedians(df_train, col, k=3)
 
     df_c = pd.read_csv(f"clustered/{SYMBOL}_clustered_process.csv")
-
-
     cluster_centers = df_c.drop(columns=['timestamp']).groupby('cluster').mean()
 
-    print("Cluster counts:")
-    print(df_c["cluster"].value_counts())
+    #print("Cluster counts:")
+    #print(df_c["cluster"].value_counts())
 
-    print(cluster_centers)
+    #print(cluster_centers)
     d = generate_rolling_data(df_test)
-    generate_predictions(d[(int)(len(d)*0):], cluster_centers)
     
     df_test = pd.read_csv(f"historic_predicted/{SYMBOL}_historic_predicted.csv")
     #stats = backtest(df_test, stdev_n=2, tp_atr=4, sl_atr=4, trade_cluster=1)
-
     optimise(df_test)
     
     

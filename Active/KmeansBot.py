@@ -17,14 +17,14 @@ import pandas as pd
 import numpy as np
 
 # === Configuration ===
-API_KEY = "PKF43TF96CSNU75ML78H"
-SECRET = "7dvMBcfe1DRzh8PkThpAP83NcUjOzidZTTOfjMaC"
+API_KEY = "PK7LLGFUSPUL7PRPME8M"
+SECRET = "yvT87Fi7AbxM1xbF48gCbhxlsNNQPKF3wV33iSLw"
 # === Data Preperation and Analysis ===
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 
 SOCKET = "wss://stream.data.alpaca.markets/v2/delayed_sip"
-SYMBOL = 'NVDA'
+SYMBOL = 'TEM'
 
 # === BOT PARAMETERS ===
 CAPITAL = 10000  # starting capital
@@ -39,6 +39,7 @@ MIN_DOLLAR_VOL = CAPITAL * 100
 take_price = 0.0
 stop_price = 0.0
 in_position = False
+technique = "meds"
 
 # === Alpaca & Databento ===
 from alpaca.data.historical import StockHistoricalDataClient
@@ -60,7 +61,7 @@ current_bar = {}
 
 
 # model loading
-df_c = pd.read_csv(f"clustered/{SYMBOL}_clustered_process.csv")
+df_c = pd.read_csv(f"clustered/{SYMBOL}_{technique}_clustered_process.csv")
 
 cluster_centers = df_c.drop(columns=['timestamp']).groupby('cluster').mean()
 
