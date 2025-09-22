@@ -28,8 +28,8 @@ from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 # === Variables ===
 WINDOW_LENGTH = 20
-TIMEFRAME = 'h'
-TIMEFRAME_LENGTH = 1
+TIMEFRAME = 'm'
+TIMEFRAME_LENGTH = 10
 SYMBOL = 'TEM'
 
 API_KEY = "PK7LLGFUSPUL7PRPME8M"
@@ -1135,11 +1135,12 @@ def plot_optimisation():
     plt.colorbar(sc, label='Win Rate (%)')
     plt.xlabel('Max Drawdown (%)')
     plt.ylabel('Net Return (%)')
-    plt.title('Optimization Results')
+    plt.title(f'Optimization Results for {SYMBOL}, timeframe {TIMEFRAME}, window {WINDOW_LENGTH}')
     plt.grid(True)
     plt.show()
 
 if __name__ == "__main__":
+    plot_optimisation()
     get_data()
     df = cull_data()
     process_data(df, save=True)
@@ -1153,18 +1154,8 @@ if __name__ == "__main__":
     run_kmeans(df_train, col, k=3)
     run_kmedians(df_train, col, k=3)
 
-    df_c = pd.read_csv(f"clustered/{SYMBOL}_clustered_process.csv")
-    cluster_centers = df_c.drop(columns=['timestamp']).groupby('cluster').mean()
-
-    #print("Cluster counts:")
-    #print(df_c["cluster"].value_counts())
-
-    #print(cluster_centers)
     d = generate_rolling_data(df_test)
-    
-    df_test = pd.read_csv(f"historic_predicted/{SYMBOL}_historic_predicted.csv")
-    #stats = backtest(df_test, stdev_n=2, tp_atr=4, sl_atr=4, trade_cluster=1)
-    optimise(df_test)
+    optimise(d)
     
     
 

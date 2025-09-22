@@ -28,11 +28,11 @@ SYMBOL = 'TEM'
 # === BOT PARAMETERS ===
 CAPITAL = 10000  # starting capital
 WINDOW_LENGTH = 20  # number of bars in each window
-TP_n = 3
-SL_n = 1
-ENTRY_n = 2.4
+TP_n = 6
+SL_n = 2.5
+ENTRY_n = 2.2
 TRADING_CLUSTER = 1  # which clusters to trade
-MIN_DOLLAR_VOL = CAPITAL * 100
+MIN_DOLLAR_VOL = CAPITAL * 10
 
 # === BOT STATE VARIABLES ===
 take_price = 0.0
@@ -67,7 +67,7 @@ def get_data(df):
     """
     This function retrieves historical stock data for a given symbol from Alpaca's API. The raw data is saved to a CSV file.
     """
-    timeframe = TimeFrame(1, TimeFrameUnit.Hour)
+    timeframe = TimeFrame(10, TimeFrameUnit.Minute)
 
     client = StockHistoricalDataClient(API_KEY, SECRET) # Initialize the Alpaca client
 
@@ -137,7 +137,7 @@ def on_message(ws, message):
 def update_bar(ts, price, size):
     global bars, current_bar
 
-    bar_time = ts.floor("h")
+    bar_time = ts.floor("10T")
 
     new_bar = current_bar.get("timestamp") != bar_time
 
