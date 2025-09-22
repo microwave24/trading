@@ -9,10 +9,9 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import asyncio
 import websocket
 import threading
-
+import time
 import json
 # === Data Handling ===
-import polars as pl
 import pandas as pd
 import numpy as np
 
@@ -29,10 +28,10 @@ SYMBOL = 'TEM'
 # === BOT PARAMETERS ===
 CAPITAL = 10000  # starting capital
 WINDOW_LENGTH = 20  # number of bars in each window
-TP_n = 1
+TP_n = 3
 SL_n = 1
-ENTRY_n = 2
-TRADING_CLUSTER = 0  # which clusters to trade
+ENTRY_n = 2.4
+TRADING_CLUSTER = 1  # which clusters to trade
 MIN_DOLLAR_VOL = CAPITAL * 100
 
 # === BOT STATE VARIABLES ===
@@ -52,9 +51,7 @@ df = pd.DataFrame(columns=["symbol", "timestamp", "close_price"])
 
 bars = pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume", "signal"])
 
-if os.path.exists("realtime/{SYMBOL}_realtime_bars.csv"):
-    bars = pd.read_csv(f"realtime/{SYMBOL}_realtime_bars.csv")
-    bars['timestamp'] = pd.to_datetime(bars['timestamp'], utc=True).dt.tz_convert('America/New_York')
+
 
 
 current_bar = {}
@@ -283,7 +280,7 @@ def trade_check(open_price, mean, std, atr, dollar_vol ,tp_atr, sl_atr, stdev_n,
                 in_pos, take_price, stop_price, prediction, trade_cluster=0):
     # default: no trade, keep current state
     signal = 0
-
+    
     if dollar_vol < MIN_DOLLAR_VOL:
         return signal, take_price, stop_price, in_pos
 
@@ -308,6 +305,15 @@ def trade_logic(window, open_price, cluster_centers):
     prediction = predict(window, cluster_centers)
     mean, std, atr, mean_dollar_vol = generate_rolling(window)
 
+    print(
+        f"\r time:{window['timestamp'].iloc[-1]} "
+        f"mean: {mean:.2f}, entry_price: {(mean - ENTRY_n*std):.2f}, "
+        f"current price: {open_price:.2f}, dollar_vol: {mean_dollar_vol:.2f}, "
+        f"prediction: {int(prediction)}",
+        end="",
+        flush=True
+    )
+
     signal, take_price, stop_price, in_position = trade_check(
             open_price, mean, std, atr, mean_dollar_vol,
             TP_n, SL_n, ENTRY_n,
@@ -320,26 +326,37 @@ def trade_logic(window, open_price, cluster_centers):
 
 
 def run_ws():
-    ws = websocket.WebSocketApp(
-        SOCKET,
-        on_open=on_open,
-        on_message=on_message,
-        on_error=on_error,
-        on_close=on_close,
-    )
-    # pings help keep some networks happy
-    ws.run_forever()
+    """Keep the websocket running; reconnect a few seconds after any close."""
+    while True:
+        ws = websocket.WebSocketApp(
+            SOCKET,
+            on_open=on_open,        # re-auth + resubscribe happens here
+            on_message=on_message,
+            on_error=on_error,
+            on_close=on_close,      # will print the close code/msg
+        )
+        try:
+            ws.run_forever(ping_interval=20, ping_timeout=10)
+        except Exception as e:
+            print(f"[ws] run_forever error: {e}")
+        print("[ws] closed; reconnecting in 5s …")
+        time.sleep(5)  # fixed small delay before retry
 
 if __name__ == "__main__":
     # EITHER run on main thread:
 
+    if os.path.exists(f"realtime/{SYMBOL}_realtime_bars.csv"):
+        print("found data!")
+        bars = pd.read_csv(f"realtime/{SYMBOL}_realtime_bars.csv")
+        bars['timestamp'] = pd.to_datetime(bars['timestamp'], utc=True).dt.tz_convert('America/New_York')
+    print(len(bars))
     if(len(bars) < WINDOW_LENGTH):
         print("Fetching initial data...")
         bars = get_data(bars)
 
         if not os.path.exists("realtime"):
             os.makedirs("realtime")
-
+        bars['signal'] = 0
         bars.to_csv(f"realtime/{SYMBOL}_realtime_bars.csv", index=False)
         print("Initial data fetched.")
     print(cluster_centers)
